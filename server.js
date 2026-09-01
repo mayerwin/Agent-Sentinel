@@ -498,6 +498,7 @@ function scanAgents() {
 
       let latestPromptText = '';
       let latestAssistantText = '';
+      let latestAssistantTimestamp = agent.messageTimeMs || now;
       let turnModel = agent.model;
 
       for (const obj of s.turns) {
@@ -510,6 +511,7 @@ function scanAgents() {
             if (firstText) latestPromptText = firstText.text || firstText;
           }
         } else if (obj.type === 'assistant' && obj.message) {
+          if (obj.timestamp) latestAssistantTimestamp = new Date(obj.timestamp).getTime();
           if (obj.message.model) turnModel = obj.message.model;
           if (obj.message.usage) agent.tokenUsage = obj.message.usage;
           if (obj.message.content) {
@@ -530,13 +532,14 @@ function scanAgents() {
 
       const features = getAgentEffectiveFeatures(agent.sessionId);
 
-      // Check for rate limit notices in latestAssistantText or recent assistant turns
-      let detectedLimit = parseRateLimitNotice(latestAssistantText, new Date(now));
+      // Check for rate limit notices in latestAssistantText or recent assistant turns relative to turn occurrence time
+      let detectedLimit = parseRateLimitNotice(latestAssistantText, new Date(latestAssistantTimestamp));
       if (!detectedLimit && s.turns && s.turns.length > 0) {
         for (let i = s.turns.length - 1; i >= Math.max(0, s.turns.length - 5); i--) {
           const t = s.turns[i];
+          const turnTime = t.timestamp ? new Date(t.timestamp).getTime() : (agent.messageTimeMs || now);
           const textCandidate = t.message?.content ? (typeof t.message.content === 'string' ? t.message.content : JSON.stringify(t.message.content)) : '';
-          const l = parseRateLimitNotice(textCandidate, new Date(now));
+          const l = parseRateLimitNotice(textCandidate, new Date(turnTime));
           if (l) { detectedLimit = l; break; }
         }
       }
