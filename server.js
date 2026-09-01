@@ -541,9 +541,6 @@ function scanAgents() {
         agent.status = 'DISABLED';
       } else if (agent.status === 'LIMITED') {
         limitedCount++;
-        if (agent.limitNotice?.resetAtMs && now >= agent.limitNotice.resetAtMs && features.autoContinue) {
-          dispatchPromptToAgent(agent, 'AUTO_CONTINUE', PROMPT_AUTO_CONTINUE, 'Rate Limit Reset Reached');
-        }
       } else if (agent.status === 'IDLE') {
         // Autonomous completion triggers if enabled
         const isRecentTurn = agent.ageMinutes < (config.lookbackHours || 6) * 60;
