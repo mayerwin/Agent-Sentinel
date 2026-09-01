@@ -26,13 +26,30 @@ const AM_QUEUE_DIR = path.join(AM_DIR, '.data', 'queue');
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 
 function findClaudeBinary() {
-  const possiblePaths = [
-    path.join(HOME, '.vscode', 'extensions', 'anthropic.claude-code-2.1.251-win32-x64', 'resources', 'native-binary', 'claude.exe'),
-    path.join(HOME, '.vscode', 'extensions', 'anthropic.claude-code-2.1.250-win32-x64', 'resources', 'native-binary', 'claude.exe'),
-    path.join(HOME, 'AppData', 'Roaming', 'Claude', 'claude-code', '2.1.170', 'claude.exe'),
+  const roots = [
+    path.join(HOME, '.vscode', 'extensions'),
+    path.join(HOME, '.cursor', 'extensions'),
+    path.join(HOME, '.windsurf', 'extensions'),
+    path.join(HOME, 'AppData', 'Roaming', 'Claude', 'claude-code')
   ];
-  for (const p of possiblePaths) {
-    if (fs.existsSync(p)) return p;
+  const candidates = [];
+  for (const root of roots) {
+    try {
+      if (!fs.existsSync(root)) continue;
+      const names = fs.readdirSync(root);
+      for (const name of names) {
+        if (!name.startsWith('anthropic.claude-code-') && !name.includes('claude')) continue;
+        const bin1 = path.join(root, name, 'resources', 'native-binary', 'claude.exe');
+        if (fs.existsSync(bin1)) candidates.push(bin1);
+        const bin2 = path.join(root, name, 'claude.exe');
+        if (fs.existsSync(bin2)) candidates.push(bin2);
+      }
+    } catch {}
+  }
+  if (candidates.length > 0) {
+    // Sort descending by folder name version
+    candidates.sort((a, b) => b.localeCompare(a));
+    return candidates[0];
   }
   return 'claude.exe';
 }
@@ -687,7 +704,7 @@ function dispatchPromptToAgent(agent, actionType = 'AUTO_CONTINUE', promptText =
   } catch (e) {}
 
   const targetCwd = agent.cwd && fs.existsSync(agent.cwd) ? agent.cwd : HOME;
-  const args = ['--resume', agent.sessionId, '-p', promptText, '--verbose', '--permission-mode', 'auto', '--output-format', 'stream-json'];
+  const args = ['--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto', '--resume', agent.sessionId];
 
   let child;
   try {
@@ -700,6 +717,7 @@ function dispatchPromptToAgent(agent, actionType = 'AUTO_CONTINUE', promptText =
       windowsHide: true
     });
     if (child.stdin) {
+      child.stdin.write(promptText);
       child.stdin.end();
     }
     child.on('error', (err) => {
