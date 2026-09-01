@@ -687,7 +687,7 @@ function dispatchPromptToAgent(agent, actionType = 'AUTO_CONTINUE', promptText =
   } catch (e) {}
 
   const targetCwd = agent.cwd && fs.existsSync(agent.cwd) ? agent.cwd : HOME;
-  const args = ['--resume', agent.sessionId, '-p', promptText, '--permission-mode', 'auto', '--output-format', 'stream-json'];
+  const args = ['--resume', agent.sessionId, '-p', promptText, '--verbose', '--permission-mode', 'auto', '--output-format', 'stream-json'];
 
   let child;
   try {
@@ -696,8 +696,27 @@ function dispatchPromptToAgent(agent, actionType = 'AUTO_CONTINUE', promptText =
     child = spawn(CLAUDE_BIN, args, {
       cwd: targetCwd,
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
+    });
+    if (child.stdin) {
+      child.stdin.end();
+    }
+    child.on('error', (err) => {
+      console.error('Failed to spawn Claude process:', err);
+      resumeRecord.status = 'FAILED';
+      resumeRecord.error = err.message;
+      addEvent('VERIFY_FAILED', agent.sessionId, agent.name, `Failed to spawn process: ${err.message}`);
+    });
+    let stderrBuf = '';
+    child.stderr?.on('data', (d) => {
+      stderrBuf += d.toString();
+    });
+    child.on('exit', (code) => {
+      if (code !== 0 && code !== null) {
+        console.warn(`Claude process exited with code ${code}: ${stderrBuf.slice(0, 300)}`);
+        resumeRecord.error = stderrBuf || `Process exited with code ${code}`;
+      }
     });
   } catch (err) {
     agent.status = 'IDLE';
