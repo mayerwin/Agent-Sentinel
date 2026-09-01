@@ -200,6 +200,84 @@ function readLastRawTurns(filePath, maxLines = 15) {
   }
 }
 
+function parseRateLimitNotice(text, now = new Date()) {
+  if (!text || typeof text !== 'string') return null;
+
+  const isSessionLimit = /session limit|5-hour limit|usage limit|rate limit|hourly limit|hit your .* limit/i.test(text);
+  const isWeeklyLimit = /weekly (usage )?limit|weekly quota/i.test(text);
+
+  if (!isSessionLimit && !isWeeklyLimit && !/resets?\s+(?:at\s+)?\d+/i.test(text)) {
+    return null;
+  }
+
+  const kind = isWeeklyLimit ? 'weekly_limit' : 'session_limit';
+
+  const timeMatch = text.match(/resets?\s+(?:at\s+)?(?:([a-zA-Z]+)\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\)|\s+([A-Z]{3,4}))?/i);
+
+  let resetAtMs = null;
+  let resetAtIso = null;
+
+  if (timeMatch) {
+    const [_, dayOfWeek, rawHours, rawMins, ampm, parenTz, suffixTz] = timeMatch;
+    let hours = parseInt(rawHours, 10);
+    const mins = rawMins ? parseInt(rawMins, 10) : 0;
+    const tz = parenTz || suffixTz || null;
+
+    if (ampm) {
+      if (ampm.toLowerCase() === 'pm' && hours < 12) hours += 12;
+      if (ampm.toLowerCase() === 'am' && hours === 12) hours = 0;
+    }
+
+    if (tz) {
+      try {
+        const nowInTzStr = now.toLocaleString('en-US', { timeZone: tz, hour12: false });
+        const nowInTz = new Date(nowInTzStr);
+        const tzOffsetMs = nowInTz.getTime() - now.getTime();
+
+        const targetInTz = new Date(nowInTz);
+        targetInTz.setHours(hours, mins, 0, 0);
+
+        if (targetInTz.getTime() <= nowInTz.getTime()) {
+          targetInTz.setDate(targetInTz.getDate() + 1);
+        }
+
+        resetAtMs = targetInTz.getTime() - tzOffsetMs;
+      } catch (e) {
+        const target = new Date(now);
+        target.setHours(hours, mins, 0, 0);
+        if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+        resetAtMs = target.getTime();
+      }
+    } else {
+      const target = new Date(now);
+      target.setHours(hours, mins, 0, 0);
+      if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+      resetAtMs = target.getTime();
+    }
+  } else {
+    const relMatch = text.match(/in\s+(\d+)\s*(m|min|minutes|h|hours?)/i);
+    if (relMatch) {
+      const val = parseInt(relMatch[1], 10);
+      const isHours = /h/i.test(relMatch[2]);
+      resetAtMs = now.getTime() + (isHours ? val * 3600000 : val * 60000);
+    } else {
+      resetAtMs = now.getTime() + 3600000;
+    }
+  }
+
+  if (resetAtMs) {
+    resetAtIso = new Date(resetAtMs).toISOString();
+  }
+
+  return {
+    kind,
+    rawNotice: text,
+    resetAtMs,
+    resetAtIso,
+    timeUntilMinutes: resetAtMs ? Math.max(0, Math.round((resetAtMs - now.getTime()) / 60000)) : null
+  };
+}
+
 function getAlivePids() {
   try {
     const stdout = execSync('tasklist /FO CSV /NH', { timeout: 3000, windowsHide: true }).toString();
@@ -411,14 +489,60 @@ function scanAgents() {
 
       const features = getAgentEffectiveFeatures(agent.sessionId);
 
+      // Check for rate limit notices in latestAssistantText or recent assistant turns
+      let detectedLimit = parseRateLimitNotice(latestAssistantText, new Date(now));
+      if (!detectedLimit && s.turns && s.turns.length > 0) {
+        for (let i = s.turns.length - 1; i >= Math.max(0, s.turns.length - 5); i--) {
+          const t = s.turns[i];
+          const textCandidate = t.message?.content ? (typeof t.message.content === 'string' ? t.message.content : JSON.stringify(t.message.content)) : '';
+          const l = parseRateLimitNotice(textCandidate, new Date(now));
+          if (l) { detectedLimit = l; break; }
+        }
+      }
+
+      if (detectedLimit) {
+        const wasLimited = (agent.status === 'LIMITED' && agent.limitNotice);
+        agent.limitNotice = {
+          kind: detectedLimit.kind,
+          rawNotice: detectedLimit.rawNotice,
+          detectedAt: agent.limitNotice?.detectedAt || new Date().toISOString(),
+          resetAtMs: detectedLimit.resetAtMs,
+          resetAtIso: detectedLimit.resetAtIso
+        };
+        if (!wasLimited) {
+          addEvent('LIMIT_DETECTED', agent.sessionId, agent.name, `Detected Rate Limit: ${detectedLimit.rawNotice.slice(0, 120)}`, detectedLimit);
+          if (detectedLimit.kind === 'weekly_limit') {
+            triggerHibernationSequence(`Agent ${agent.name} reached weekly limit`);
+          }
+        }
+        if (!config.globalPaused && agent.enabled) {
+          agent.status = 'LIMITED';
+        }
+      } else if (agent.limitNotice && now < agent.limitNotice.resetAtMs) {
+        // Still within limit reset window
+        if (!config.globalPaused && agent.enabled && agent.status !== 'RESUMING' && agent.status !== 'VERIFYING') {
+          agent.status = 'LIMITED';
+        }
+      } else if (agent.limitNotice && now >= agent.limitNotice.resetAtMs) {
+        // Limit reset reached!
+        const prevLimit = agent.limitNotice;
+        agent.limitNotice = null;
+        addEvent('INFO', agent.sessionId, agent.name, `Limit reset window reached for ${agent.name}`);
+        if (features.autoContinue && !config.globalPaused && agent.enabled) {
+          dispatchPromptToAgent(agent, 'AUTO_CONTINUE', PROMPT_AUTO_CONTINUE, 'Rate Limit Reset Window Reached');
+        } else if (!config.globalPaused && agent.enabled) {
+          agent.status = isProcessAlive ? 'ACTIVE' : 'IDLE';
+        }
+      }
+
       if (config.globalPaused) {
         agent.status = 'PAUSED';
       } else if (!agent.enabled) {
         agent.status = 'DISABLED';
-      } else if (agent.limitNotice && agent.status === 'LIMITED') {
+      } else if (agent.status === 'LIMITED') {
         limitedCount++;
-        if (agent.limitNotice.resetAtMs && now >= agent.limitNotice.resetAtMs && features.autoContinue) {
-          dispatchPromptToAgent(agent, 'AUTO_CONTINUE', PROMPT_AUTO_CONTINUE, 'LLM-Verified Reset Reached');
+        if (agent.limitNotice?.resetAtMs && now >= agent.limitNotice.resetAtMs && features.autoContinue) {
+          dispatchPromptToAgent(agent, 'AUTO_CONTINUE', PROMPT_AUTO_CONTINUE, 'Rate Limit Reset Reached');
         }
       } else if (agent.status === 'IDLE') {
         // Autonomous completion triggers if enabled
@@ -806,6 +930,9 @@ const server = http.createServer((req, res) => {
         ageMinutes: a.ageMinutes,
         messageTimeIso: a.lastActivityIso,
         currentStatus: a.status,
+        lastPrompt: a.lastPrompt,
+        lastAssistantMessage: a.lastAssistantMessage,
+        limitNotice: a.limitNotice,
         llmEvaluation: a.llmEvaluation,
         rawRecentTurns: a.rawRecentTurns
       }));
