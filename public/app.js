@@ -87,41 +87,45 @@ function formatTimeRemaining(ms) {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
-function startCountdownTicking() {
-  if (countdownInterval) clearInterval(countdownInterval);
-  countdownInterval = setInterval(() => {
-    if (!currentStatus || !currentStatus.agents) return;
+function updateCountdowns() {
+  if (!currentStatus || !currentStatus.agents) return;
+  const now = Date.now();
 
-    const limitedAgents = currentStatus.agents.filter(a => a.status === 'LIMITED' && a.limitNotice && a.enabled && !currentStatus.config?.globalPaused);
-    if (limitedAgents.length === 0) {
-      limitHeroSection.style.display = 'none';
-      return;
+  const limitedAgents = currentStatus.agents.filter(a => a.status === 'LIMITED' && a.limitNotice && a.enabled && !currentStatus.config?.globalPaused);
+  if (limitedAgents.length === 0) {
+    limitHeroSection.style.display = 'none';
+    return;
+  }
+
+  limitHeroSection.style.display = 'block';
+
+  let minResetMs = Infinity;
+
+  for (const a of limitedAgents) {
+    if (a.limitNotice.resetAtMs && a.limitNotice.resetAtMs < minResetMs) {
+      minResetMs = a.limitNotice.resetAtMs;
     }
+  }
 
-    limitHeroSection.style.display = 'block';
-
-    let minResetMs = Infinity;
-    const now = Date.now();
-
-    for (const a of limitedAgents) {
-      if (a.limitNotice.resetAtMs && a.limitNotice.resetAtMs < minResetMs) {
-        minResetMs = a.limitNotice.resetAtMs;
-      }
-    }
-
+  if (Number.isFinite(minResetMs)) {
     const diff = Math.max(0, minResetMs - now);
     heroCountdownTimer.textContent = formatTimeRemaining(diff);
     heroResetTarget.textContent = `Resets at: ${new Date(minResetMs).toLocaleTimeString()} (${new Date(minResetMs).toLocaleDateString()})`;
+  }
 
-    document.querySelectorAll('.live-card-countdown').forEach(el => {
-      const resetMs = parseInt(el.dataset.resetMs, 10);
-      if (resetMs) {
-        const cDiff = Math.max(0, resetMs - now);
-        el.textContent = formatTimeRemaining(cDiff);
-      }
-    });
+  document.querySelectorAll('.live-card-countdown').forEach(el => {
+    const resetMs = parseInt(el.dataset.resetMs, 10);
+    if (resetMs) {
+      const cDiff = Math.max(0, resetMs - now);
+      el.textContent = formatTimeRemaining(cDiff);
+    }
+  });
+}
 
-  }, 500);
+function startCountdownTicking() {
+  if (countdownInterval) clearInterval(countdownInterval);
+  updateCountdowns();
+  countdownInterval = setInterval(updateCountdowns, 500);
 }
 
 function handleHibernationBanner(hibernation) {
@@ -445,6 +449,7 @@ function renderDashboard(status) {
   }
 
   agentsContainer.innerHTML = filtered.map(agent => renderAgentCard(agent)).join('');
+  updateCountdowns();
 
   document.querySelectorAll('.agent-toggle-monitored').forEach(chk => {
     chk.addEventListener('change', (e) => {
@@ -515,6 +520,8 @@ function renderAgentCard(agent) {
   }
 
   const resetMs = agent.limitNotice?.resetAtMs || 0;
+  const now = Date.now();
+  const initialRemaining = (resetMs && resetMs > now) ? formatTimeRemaining(resetMs - now) : '00:00:00';
   const llmEval = agent.llmEvaluation;
 
   return `
@@ -586,7 +593,7 @@ function renderAgentCard(agent) {
         <div class="limit-banner">
           <div class="limit-banner-text">
             <strong>${agent.limitNotice.kind === 'weekly_limit' ? 'Weekly Limit' : 'Session Limit'}:</strong>
-            Auto-resuming in <span class="live-card-countdown limit-banner-countdown" data-reset-ms="${resetMs}">00:00:00</span>
+            Auto-resuming in <span class="live-card-countdown limit-banner-countdown" data-reset-ms="${resetMs}">${initialRemaining}</span>
           </div>
           <button class="btn btn-outline btn-xs btn-resume-agent" data-session-id="${agent.sessionId}">Force Continue Now</button>
         </div>
