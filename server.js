@@ -200,6 +200,65 @@ function readLastRawTurns(filePath, maxLines = 15) {
   }
 }
 
+const TZ_MAP = {
+  'EST': 'America/New_York',
+  'EDT': 'America/New_York',
+  'PST': 'America/Los_Angeles',
+  'PDT': 'America/Los_Angeles',
+  'CST': 'America/Chicago',
+  'CDT': 'America/Chicago',
+  'MST': 'America/Denver',
+  'MDT': 'America/Denver',
+  'UTC': 'UTC',
+  'GMT': 'UTC',
+  'BST': 'Europe/London',
+  'CET': 'Europe/Paris',
+  'CEST': 'Europe/Paris',
+};
+
+function getUtcForTimeInZone(hours, mins, targetTz, now = new Date()) {
+  const resolvedTz = TZ_MAP[targetTz] || targetTz;
+  try {
+    const dtf = new Intl.DateTimeFormat('en-US', {
+      timeZone: resolvedTz,
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: 'numeric',
+      second: 'numeric',
+      hour12: false
+    });
+
+    const parts = Object.fromEntries(dtf.formatToParts(now).map(p => [p.type, p.value]));
+    const tzYear = parseInt(parts.year, 10);
+    const tzMonth = parseInt(parts.month, 10);
+    const tzDay = parseInt(parts.day, 10);
+    const tzHour = parseInt(parts.hour, 10);
+    const tzMin = parseInt(parts.minute, 10);
+
+    let isTomorrow = false;
+    if (hours < tzHour || (hours === tzHour && mins < tzMin - 2)) {
+      isTomorrow = true;
+    }
+
+    const targetDay = isTomorrow ? tzDay + 1 : tzDay;
+    const guessUtc = new Date(Date.UTC(tzYear, tzMonth - 1, targetDay, hours, mins, 0, 0));
+
+    const tzPartsAtGuess = Object.fromEntries(dtf.formatToParts(guessUtc).map(p => [p.type, p.value]));
+    const hAtGuess = parseInt(tzPartsAtGuess.hour, 10);
+    const mAtGuess = parseInt(tzPartsAtGuess.minute, 10);
+
+    const diffMinutes = (hAtGuess * 60 + mAtGuess) - (hours * 60 + mins);
+    return guessUtc.getTime() - (diffMinutes * 60000);
+  } catch (e) {
+    const target = new Date(now);
+    target.setHours(hours, mins, 0, 0);
+    if (target.getTime() < now.getTime() - 120000) target.setDate(target.getDate() + 1);
+    return target.getTime();
+  }
+}
+
 function parseRateLimitNotice(text, now = new Date()) {
   if (!text || typeof text !== 'string') return null;
 
@@ -229,29 +288,11 @@ function parseRateLimitNotice(text, now = new Date()) {
     }
 
     if (tz) {
-      try {
-        const nowInTzStr = now.toLocaleString('en-US', { timeZone: tz, hour12: false });
-        const nowInTz = new Date(nowInTzStr);
-        const tzOffsetMs = nowInTz.getTime() - now.getTime();
-
-        const targetInTz = new Date(nowInTz);
-        targetInTz.setHours(hours, mins, 0, 0);
-
-        if (targetInTz.getTime() <= nowInTz.getTime()) {
-          targetInTz.setDate(targetInTz.getDate() + 1);
-        }
-
-        resetAtMs = targetInTz.getTime() - tzOffsetMs;
-      } catch (e) {
-        const target = new Date(now);
-        target.setHours(hours, mins, 0, 0);
-        if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
-        resetAtMs = target.getTime();
-      }
+      resetAtMs = getUtcForTimeInZone(hours, mins, tz, now);
     } else {
       const target = new Date(now);
       target.setHours(hours, mins, 0, 0);
-      if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+      if (target.getTime() < now.getTime() - 120000) target.setDate(target.getDate() + 1);
       resetAtMs = target.getTime();
     }
   } else {
@@ -501,22 +542,40 @@ function scanAgents() {
       }
 
       if (detectedLimit) {
-        const wasLimited = (agent.status === 'LIMITED' && agent.limitNotice);
-        agent.limitNotice = {
-          kind: detectedLimit.kind,
-          rawNotice: detectedLimit.rawNotice,
-          detectedAt: agent.limitNotice?.detectedAt || new Date().toISOString(),
-          resetAtMs: detectedLimit.resetAtMs,
-          resetAtIso: detectedLimit.resetAtIso
-        };
-        if (!wasLimited) {
-          addEvent('LIMIT_DETECTED', agent.sessionId, agent.name, `Detected Rate Limit: ${detectedLimit.rawNotice.slice(0, 120)}`, detectedLimit);
-          if (detectedLimit.kind === 'weekly_limit') {
-            triggerHibernationSequence(`Agent ${agent.name} reached weekly limit`);
+        if (now >= detectedLimit.resetAtMs) {
+          // Limit has arrived / expired!
+          if (agent.lastAutoContinuedLimitAt !== detectedLimit.resetAtMs) {
+            agent.lastAutoContinuedLimitAt = detectedLimit.resetAtMs;
+            agent.limitNotice = null;
+            addEvent('INFO', agent.sessionId, agent.name, `Rate limit reset window reached for ${agent.name}`);
+            if (features.autoContinue && !config.globalPaused && agent.enabled) {
+              dispatchPromptToAgent(agent, 'AUTO_CONTINUE', PROMPT_AUTO_CONTINUE, 'Rate Limit Reset Window Reached');
+            } else if (!config.globalPaused && agent.enabled) {
+              agent.status = isProcessAlive ? 'ACTIVE' : 'IDLE';
+            }
+          } else if (!config.globalPaused && agent.enabled && agent.status === 'LIMITED') {
+            agent.limitNotice = null;
+            agent.status = isProcessAlive ? 'ACTIVE' : 'IDLE';
           }
-        }
-        if (!config.globalPaused && agent.enabled) {
-          agent.status = 'LIMITED';
+        } else {
+          // Limit is active in the future
+          const wasLimited = (agent.status === 'LIMITED' && agent.limitNotice);
+          agent.limitNotice = {
+            kind: detectedLimit.kind,
+            rawNotice: detectedLimit.rawNotice,
+            detectedAt: agent.limitNotice?.detectedAt || new Date().toISOString(),
+            resetAtMs: detectedLimit.resetAtMs,
+            resetAtIso: detectedLimit.resetAtIso
+          };
+          if (!wasLimited) {
+            addEvent('LIMIT_DETECTED', agent.sessionId, agent.name, `Detected Rate Limit: ${detectedLimit.rawNotice.slice(0, 120)}`, detectedLimit);
+            if (detectedLimit.kind === 'weekly_limit') {
+              triggerHibernationSequence(`Agent ${agent.name} reached weekly limit`);
+            }
+          }
+          if (!config.globalPaused && agent.enabled) {
+            agent.status = 'LIMITED';
+          }
         }
       } else if (agent.limitNotice && now < agent.limitNotice.resetAtMs) {
         // Still within limit reset window
