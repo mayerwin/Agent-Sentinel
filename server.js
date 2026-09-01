@@ -683,7 +683,7 @@ function dispatchPromptToAgent(agent, actionType = 'AUTO_CONTINUE', promptText =
   try {
     if (!fs.existsSync(AM_QUEUE_DIR)) fs.mkdirSync(AM_QUEUE_DIR, { recursive: true });
     const qFile = path.join(AM_QUEUE_DIR, `${agent.sessionId}.json`);
-    fs.writeFileSync(qFile, JSON.stringify({ reason: actionType, prompt: promptText, createdAt: nowMs }), 'utf8');
+    fs.writeFileSync(qFile, JSON.stringify({ reason: promptText, action: actionType, createdAt: nowMs }), 'utf8');
   } catch (e) {}
 
   const targetCwd = agent.cwd && fs.existsSync(agent.cwd) ? agent.cwd : HOME;
