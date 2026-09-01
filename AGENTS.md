@@ -92,3 +92,9 @@ Schedule a recurring 2-minute timer via the `schedule` tool:
   "Prompt": "Perform LLM Cognitive Supervision check: inspect latest Claude Code agent transcript turns, interpret messages for session/weekly limits, trigger 'continue' if limit reset time arrived, verify running status, and post LLM evaluation updates to the dashboard server at http://localhost:3456."
 }
 ```
+
+---
+
+## 6. Server Shutdown & Exit Policy
+- If the Sentinel server is offline, down, or was explicitly stopped/logged out by the user via the dashboard/API (`/api/shutdown`), the agent **MUST NOT** attempt to restart the server.
+- Immediately cancel/kill all running recurring cron schedules (`manage_task` kill), terminate any background tasks, and gracefully end the turn without performing further checks.

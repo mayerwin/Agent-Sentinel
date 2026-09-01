@@ -11,7 +11,7 @@
 
 ![Agent Sentinel Dashboard Overview](docs/screenshots/dashboard-overview.png)
 
-Agent Sentinel is an intelligent supervisory dashboard and daemon designed for multi-agent AI development workflows. Instead of relying on fragile regex matching, Agent Sentinel works with any **LLM Cognitive Supervisor** to analyze transcript semantics, distinguish between active execution and true rate limits, automatically issue resume instructions (*"continue"*), autonomously trigger bug-free hardening reviews upon task completion, and optionally hibernate your machine on weekly quota exhaustion.
+Agent Sentinel is an intelligent supervisory dashboard and autonomous daemon designed for multi-agent **Claude Code** development workflows (with extensible architecture for additional agent runtimes). Executable by any AI coding assistant (Antigravity, Cursor, Windsurf, Claude Code, etc.) or run as a standalone service, Agent Sentinel uses continuous **LLM Cognitive Supervision** to analyze transcript semantics, distinguish between active execution and true rate limits, automatically issue resume instructions (*"continue"*), autonomously trigger bug-free hardening reviews upon task completion, and optionally hibernate your machine on weekly quota exhaustion.
 
 ---
 
