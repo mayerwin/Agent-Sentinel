@@ -562,6 +562,9 @@ function scanAgents() {
       } else if (agent.status === 'ACTIVE' || agent.status === 'RESUMING' || agent.status === 'VERIFYING' || agent.status === 'AUTO_FIXING' || agent.status === 'AUTO_IMPROVING') {
         activeCount++;
       }
+
+      agent.activitySignature = `${agent.fileSize}_${agent.messageTimeMs}_${agent.isProcessAlive}_${agent.status}`;
+      agent.needsEvaluation = (agent.lastEvaluatedSignature !== agent.activitySignature);
     }
 
     state.stats.totalScanned = state.agents.size;
@@ -920,7 +923,8 @@ const server = http.createServer((req, res) => {
     }
 
     if (pathname === '/api/raw-agent-context') {
-      const list = Array.from(state.agents.values()).map(a => ({
+      const onlyChanged = req.url.includes('onlyChanged=true') || req.url.includes('onlyPending=true');
+      const allAgents = Array.from(state.agents.values()).map(a => ({
         sessionId: a.sessionId,
         name: a.name,
         cwd: a.cwd,
@@ -930,14 +934,21 @@ const server = http.createServer((req, res) => {
         ageMinutes: a.ageMinutes,
         messageTimeIso: a.lastActivityIso,
         currentStatus: a.status,
+        needsEvaluation: !!a.needsEvaluation,
         lastPrompt: a.lastPrompt,
         lastAssistantMessage: a.lastAssistantMessage,
         limitNotice: a.limitNotice,
         llmEvaluation: a.llmEvaluation,
         rawRecentTurns: a.rawRecentTurns
       }));
+      const returnedList = onlyChanged ? allAgents.filter(a => a.needsEvaluation) : allAgents;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, agents: list }));
+      res.end(JSON.stringify({
+        ok: true,
+        totalAgents: allAgents.length,
+        pendingCount: allAgents.filter(a => a.needsEvaluation).length,
+        agents: returnedList
+      }));
       return;
     }
 
@@ -952,6 +963,9 @@ const server = http.createServer((req, res) => {
           for (const ev of evalList) {
             const agent = state.agents.get(ev.sessionId);
             if (!agent) continue;
+
+            agent.lastEvaluatedSignature = agent.activitySignature || `${agent.fileSize}_${agent.messageTimeMs}_${agent.isProcessAlive}_${agent.status}`;
+            agent.needsEvaluation = false;
 
             agent.llmEvaluation = {
               status: ev.status || agent.status,

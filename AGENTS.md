@@ -17,22 +17,25 @@ When the user opens this repository in Google Antigravity and says **"proceed"**
 
 ---
 
-## 2. LLM Cognitive Supervision Loop
+## 2. LLM Cognitive Supervision Loop (Token-Optimized Differential Checks)
 **DO NOT rely on simplistic regexes to classify agent states.**
-As an intelligent LLM, you are the Cognitive Supervisor. In each supervision check:
+As an intelligent LLM, you are the Cognitive Supervisor. To maximize speed and minimize token consumption:
 
-1. Fetch the raw context from the server:
+1. Fetch pending/changed agent contexts from the server:
    ```bash
-   GET http://localhost:3456/api/raw-agent-context
+   GET http://localhost:3456/api/raw-agent-context?onlyChanged=true
    ```
-2. Inspect the latest conversation turns for each discovered agent:
+   *If `pendingCount === 0` and no agents have new turns, immediately end the check with zero redundant token usage.*
+
+2. For any agents returned in `agents` (newly discovered or active changes):
    - Understand the semantics of the prompt, tool usage, error messages, and responses.
    - Accurately determine if the agent is:
      - `ACTIVE`: actively executing tools, computing, or writing code.
      - `IDLE`: completed its task, waiting for user instructions.
      - `LIMITED`: encountered a session rate limit, 5-hour ceiling, or weekly quota limit.
    - If limited, extract the exact timezone-aware reset timestamp (e.g. `resets 5:00 PM EST` or `resets Monday 9:00 AM`).
-3. Post your cognitive evaluations to the dashboard server:
+
+3. Post cognitive evaluations for the changed agents to the dashboard server:
    ```javascript
    POST http://localhost:3456/api/supervisor/submit-evaluation
    Content-Type: application/json
