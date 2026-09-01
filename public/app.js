@@ -710,7 +710,7 @@ async function shutdownServer() {
       document.body.innerHTML = `
         <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; font-family:Inter,sans-serif; color:#94a3b8; text-align:center;">
           <h2 style="color:#f8fafc; margin-bottom:10px;">Agent Sentinel Stopped</h2>
-          <p>Server process terminated. You can relaunch at any time by opening this repo in Antigravity and typing <strong>"proceed"</strong>.</p>
+          <p>Server process terminated. You can relaunch at any time from your AI supervisor or by running <strong>"npm start"</strong>.</p>
         </div>
       `;
     }, 600);

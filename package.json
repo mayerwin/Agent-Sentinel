@@ -13,7 +13,8 @@
     "agent-supervisor",
     "rate-limit-monitor",
     "auto-resume",
-    "antigravity",
+    "ai-agents",
+    "cognitive-supervisor",
     "ai-sentinel"
   ],
   "author": "Erwin Mayer",

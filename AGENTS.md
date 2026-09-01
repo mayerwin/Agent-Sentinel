@@ -1,6 +1,6 @@
-# Agent-Sentinel: Antigravity AI Supervisor Agent Instructions
+# Agent Sentinel: AI Cognitive Supervisor Agent Instructions
 
-When the user opens this repository in Google Antigravity and says **"proceed"**, **"start monitoring"**, or invokes **/goal**, you must execute the following end-to-end cognitive supervision workflow:
+When the user opens this repository in an AI coding assistant (Antigravity, Cursor, Windsurf, Claude, etc.) and says **"proceed"**, **"start monitoring"**, or invokes **/goal**, you must execute the following end-to-end cognitive supervision workflow:
 
 ---
 

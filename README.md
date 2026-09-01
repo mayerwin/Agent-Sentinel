@@ -4,14 +4,14 @@
 
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Powered by Antigravity](https://img.shields.io/badge/Supervisor-Google%20Antigravity-8A2BE2.svg)](https://deepmind.google)
+[![Compatible with Any AI Supervisor](https://img.shields.io/badge/Supervisor-Any%20AI%20Agent-8A2BE2.svg)](#)
 [![Architecture: LLM Cognitive](https://img.shields.io/badge/Architecture-Cognitive%20Reasoning-orange.svg)](#how-it-works)
 
 ---
 
 ![Agent Sentinel Dashboard Overview](docs/screenshots/dashboard-overview.png)
 
-Agent Sentinel is an intelligent supervisory dashboard and daemon designed for multi-agent Claude Code development workflows. Instead of relying on fragile regex matching, Agent Sentinel uses an **LLM Cognitive Supervisor** to analyze transcript semantics, distinguish between active execution and true rate limits, automatically issue resume instructions (*"continue"*), autonomously trigger bug-free hardening reviews upon task completion, and optionally hibernate your machine on weekly quota exhaustion.
+Agent Sentinel is an intelligent supervisory dashboard and daemon designed for multi-agent AI development workflows. Instead of relying on fragile regex matching, Agent Sentinel works with any **LLM Cognitive Supervisor** to analyze transcript semantics, distinguish between active execution and true rate limits, automatically issue resume instructions (*"continue"*), autonomously trigger bug-free hardening reviews upon task completion, and optionally hibernate your machine on weekly quota exhaustion.
 
 ---
 
@@ -70,13 +70,13 @@ Configure behavior globally in Settings or override per agent:
 
 ## 🚀 Quick Start
 
-### Method A: One-Click Antigravity Pairing (Recommended)
-1. Open this repository in **Google Antigravity**:
+### Method A: AI Assistant / Pair-Programming Agent Pairing (Recommended)
+1. Open this repository in your AI coding environment (Google Antigravity, Cursor, Claude Code, Windsurf, etc.):
    ```
    C:\Users\erwin\Dropbox\Projects\GitHub\Agent-Sentinel
    ```
-2. Type **`proceed`** or **`/goal`** in the chat prompt.
-3. Antigravity will automatically start the background Sentinel server, discover your active Claude Code agents, perform LLM cognitive interpretations, and open the dashboard at **[http://localhost:3456](http://localhost:3456)**!
+2. Ask your AI assistant to **`start monitoring`** or **`proceed`**.
+3. The AI agent will automatically start the background Sentinel server, discover your active agents, perform cognitive interpretations, and open the dashboard at **[http://localhost:3456](http://localhost:3456)**!
 
 ---
 
@@ -155,7 +155,7 @@ flowchart TD
     end
 
     subgraph Cognitive_Supervisor [AI Cognitive Layer]
-        LLM[Antigravity / Gemini Supervisor]
+        LLM[Any AI Supervisor (Antigravity, Claude, Gemini, GPT, etc.)]
         API -->|Raw Context| LLM
         LLM -->|Cognitive Diagnostics| API
     end
