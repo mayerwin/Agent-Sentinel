@@ -1,0 +1,21 @@
+{
+  "name": "agent-sentinel",
+  "version": "1.0.0",
+  "description": "AI Cognitive Supervisor & Auto-Resume Sentinel for Claude Code Agents with Rate Limit Intelligence & Windows Hibernation",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "supervise": "node tools/supervise-cli.js"
+  },
+  "keywords": [
+    "claude-code",
+    "agent-supervisor",
+    "rate-limit-monitor",
+    "auto-resume",
+    "antigravity",
+    "ai-sentinel"
+  ],
+  "author": "Erwin Mayer",
+  "license": "MIT"
+}

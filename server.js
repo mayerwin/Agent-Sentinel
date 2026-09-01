@@ -1,0 +1,1094 @@
+/**
+ * Agent-Sentinel Server
+ * AI Cognitive Supervisor & Auto-Resume Monitor for Claude Code Agents
+ */
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawn, execSync, exec } = require('child_process');
+
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT EXCEPTION]:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED REJECTION]:', reason);
+});
+
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3456;
+const HOME = os.homedir();
+const CLAUDE_DIR = path.join(HOME, '.claude');
+const SESSIONS_DIR = path.join(CLAUDE_DIR, 'sessions');
+const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
+const AM_DIR = 'C:\\Users\\erwin\\Dropbox\\Projects\\GitHub\\Agent-Manager';
+const AM_QUEUE_DIR = path.join(AM_DIR, '.data', 'queue');
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+
+function findClaudeBinary() {
+  const possiblePaths = [
+    path.join(HOME, '.vscode', 'extensions', 'anthropic.claude-code-2.1.251-win32-x64', 'resources', 'native-binary', 'claude.exe'),
+    path.join(HOME, '.vscode', 'extensions', 'anthropic.claude-code-2.1.250-win32-x64', 'resources', 'native-binary', 'claude.exe'),
+    path.join(HOME, 'AppData', 'Roaming', 'Claude', 'claude-code', '2.1.170', 'claude.exe'),
+  ];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return 'claude.exe';
+}
+
+const CLAUDE_BIN = findClaudeBinary();
+
+// Prompt Templates & Builders
+const PROMPT_AUTO_CONTINUE = 'continue';
+
+function getPromptForAction(actionType) {
+  const allowSubagents = config.authorizeSubagents !== false;
+  if (actionType === 'continue') {
+    return PROMPT_AUTO_CONTINUE;
+  }
+  if (actionType === 'autofix') {
+    const subagentClause = allowSubagents
+      ? '(or spawn dedicated adversarial subagents)'
+      : '(without spawning subagents)';
+    return `Perform an exhaustive adversarial code & visual hardening audit:
+
+1. MULTI-DIMENSIONAL ADVERSARIAL REVIEW:
+Adopt a rigorous adversarial red-team mindset ${subagentClause} to stress-test your implementation against the original specifications:
+- Actively attempt to break edge cases, input validation, concurrency boundaries, and error handling.
+- Verify exact compliance against all stated requirements and design constraints without making charitable assumptions.
+
+2. BUG & FUNCTIONAL INTEGRITY AUDIT:
+Conduct a meticulous deep-dive across all modified and related files to guarantee 100% bug-free behavior, type safety, test passing, and robust error recovery.
+
+3. PIXEL-PERFECT VISUAL & UX SCRUTINY:
+Adversarially scrutinize all UI components, layouts, typography, animations, color palettes, and responsive breakpoints to guarantee a flawless, pixel-perfect user experience.
+
+4. REGRESSION & DIFF VERIFICATION:
+Inspect git diffs line-by-line to ensure zero regressions, no unintended side effects, and clean code hygiene.
+
+5. MULTI-PASS CONVERGENCE LOOP:
+Continue independent, adversarial review passes in a loop until no further bugs, discrepancies, edge-case failures, or improvements can be found. If any issue is discovered, fix it cleanly and re-validate before concluding.`;
+  }
+  if (actionType === 'autoimprove') {
+    const subagentClause = allowSubagents
+      ? '\n(You are explicitly authorized to spawn specialized subagents to isolate profiling and refactoring tasks.)\n'
+      : '';
+    return `Perform an autonomous deep enhancement and optimization cycle for this project:
+${subagentClause}
+1. ARCHITECTURE & CODE HEALTH:
+Analyze the codebase for latency bottlenecks, unnecessary allocations, redundant disk/network I/O, and code duplication. Refactor complex or brittle logic into clean, modular, maintainable patterns while maintaining strict backward compatibility.
+
+2. USER EXPERIENCE & VISUAL/API POLISH:
+Elevate the UX/UI or API ergonomics to a world-class standard. Ensure fluid interactions, robust feedback, intuitive defaults, clean logs, and pixel-perfect presentation.
+
+3. RESILIENCE & EDGE-CASE HARDENING:
+Identify potential failure modes (network timeouts, malformed inputs, race conditions, file permission limits, cold starts) and implement defensive guards, graceful degradation, and actionable error messages.
+
+4. COMPREHENSIVE TEST & INTEGRITY VALIDATION:
+Run all test suites, linters, and type-checks. Add test coverage for newly optimized paths and verify that the system runs flawlessly at peak performance. Keep iterating until no further improvements are possible.`;
+  }
+  return PROMPT_AUTO_CONTINUE;
+}
+
+// Default Configuration
+let config = {
+  globalPaused: false,
+  lookbackHours: 6,
+  recheckIntervalSeconds: 120,
+  hibernateOnWeeklyLimit: false,
+  autoResumeEnabled: true,
+  defaultAutoContinue: true,
+  defaultAutoFix: false,
+  defaultAutoImprove: false,
+  authorizeSubagents: true,
+  verificationTimeoutSeconds: 60,
+  disabledSessionIds: [],
+  agentOverrides: {}
+};
+
+try {
+  if (fs.existsSync(CONFIG_FILE)) {
+    config = { ...config, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) };
+  }
+} catch (e) {}
+
+function getAgentEffectiveFeatures(sessionId) {
+  const overrides = config.agentOverrides?.[sessionId] || {};
+  return {
+    autoContinue: overrides.autoContinue !== undefined ? overrides.autoContinue : (config.defaultAutoContinue !== undefined ? config.defaultAutoContinue : true),
+    autoFix: overrides.autoFix !== undefined ? overrides.autoFix : (config.defaultAutoFix !== undefined ? config.defaultAutoFix : false),
+    autoImprove: overrides.autoImprove !== undefined ? overrides.autoImprove : (config.defaultAutoImprove !== undefined ? config.defaultAutoImprove : false)
+  };
+}
+
+function saveConfig() {
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
+  } catch (e) {}
+}
+
+// Global In-Memory State
+const state = {
+  startedAt: new Date().toISOString(),
+  lastScanAt: null,
+  agents: new Map(),
+  events: [],
+  resumes: [],
+  hibernation: {
+    pending: false,
+    reason: null,
+    targetTimestamp: null,
+    timer: null
+  },
+  stats: {
+    totalScanned: 0,
+    activeRunning: 0,
+    limited: 0,
+    resumedAndVerified: 0,
+  }
+};
+
+function addEvent(type, sessionId, sessionName, message, metadata = {}) {
+  const evt = {
+    id: 'evt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    timestamp: new Date().toISOString(),
+    type,
+    sessionId,
+    sessionName,
+    message,
+    metadata
+  };
+  state.events.unshift(evt);
+  if (state.events.length > 300) state.events.pop();
+  broadcastSSE('event', evt);
+  return evt;
+}
+
+function readLastRawTurns(filePath, maxLines = 15) {
+  try {
+    const stats = fs.statSync(filePath);
+    if (stats.size === 0) return { turns: [], latestMessageTimestamp: null };
+    const bufferSize = Math.min(stats.size, 128 * 1024);
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(bufferSize);
+    fs.readSync(fd, buf, 0, bufferSize, stats.size - bufferSize);
+    fs.closeSync(fd);
+    const text = buf.toString('utf8');
+    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    const tailLines = lines.slice(-maxLines);
+
+    const turns = [];
+    let latestMessageTimestamp = null;
+
+    for (const l of tailLines) {
+      try {
+        const obj = JSON.parse(l);
+        turns.push(obj);
+        if (obj.timestamp) {
+          const t = new Date(obj.timestamp).getTime();
+          if (t && (!latestMessageTimestamp || t > latestMessageTimestamp)) {
+            latestMessageTimestamp = t;
+          }
+        }
+      } catch (e) {}
+    }
+
+    return { turns, latestMessageTimestamp };
+  } catch (e) {
+    return { turns: [], latestMessageTimestamp: null };
+  }
+}
+
+function getAlivePids() {
+  try {
+    const stdout = execSync('tasklist /FO CSV /NH', { timeout: 3000, windowsHide: true }).toString();
+    const pids = new Set();
+    for (const line of stdout.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const parts = line.split('","');
+      if (parts.length >= 2) {
+        const pidStr = parts[1].replace(/"/g, '').trim();
+        const pid = parseInt(pidStr, 10);
+        if (Number.isFinite(pid)) pids.add(pid);
+      }
+    }
+    return pids;
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function triggerHibernationSequence(reason) {
+  if (config.globalPaused) return;
+  if (state.hibernation.pending) return;
+  if (!config.hibernateOnWeeklyLimit) return;
+
+  const graceSeconds = 30;
+  const targetTimestamp = Date.now() + graceSeconds * 1000;
+
+  state.hibernation.pending = true;
+  state.hibernation.reason = reason;
+  state.hibernation.targetTimestamp = targetTimestamp;
+
+  addEvent('HIBERNATE_TRIGGERED', null, 'SYSTEM', `⚠️ Weekly limit reached! PC hibernation scheduled in ${graceSeconds}s (${reason})`, {
+    targetTimestamp
+  });
+  broadcastSSE('hibernation_status', { pending: true, reason, targetTimestamp });
+
+  state.hibernation.timer = setTimeout(() => {
+    if (state.hibernation.pending) {
+      addEvent('HIBERNATE_EXECUTED', null, 'SYSTEM', `Executing system hibernation: shutdown /h`);
+      try {
+        exec('shutdown /h', (err) => {
+          if (err) console.error('Hibernation error:', err.message);
+        });
+      } catch (e) {
+        console.error('Hibernation spawn error:', e.message);
+      }
+    }
+  }, graceSeconds * 1000);
+}
+
+function cancelHibernation() {
+  if (!state.hibernation.pending) return false;
+  if (state.hibernation.timer) clearTimeout(state.hibernation.timer);
+  state.hibernation.pending = false;
+  state.hibernation.reason = null;
+  state.hibernation.targetTimestamp = null;
+  state.hibernation.timer = null;
+  addEvent('INFO', null, 'SYSTEM', `PC Hibernation cancelled by user.`);
+  broadcastSSE('hibernation_status', { pending: false });
+  return true;
+}
+
+function scanAgents() {
+  try {
+    const now = Date.now();
+    const lookbackMs = (config.lookbackHours || 6) * 3600 * 1000;
+    const cutoffTime = now - lookbackMs;
+    const alivePids = getAlivePids();
+
+    const activeSessionMeta = new Map();
+    if (fs.existsSync(SESSIONS_DIR)) {
+      const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json'));
+      for (const f of files) {
+        try {
+          const meta = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8'));
+          if (meta && meta.sessionId) {
+            activeSessionMeta.set(meta.sessionId, meta);
+          }
+        } catch (e) {}
+      }
+    }
+
+    const foundSessions = [];
+    if (fs.existsSync(PROJECTS_DIR)) {
+      const projectDirs = fs.readdirSync(PROJECTS_DIR);
+      for (const pDir of projectDirs) {
+        const fullPDir = path.join(PROJECTS_DIR, pDir);
+        try {
+          if (!fs.statSync(fullPDir).isDirectory()) continue;
+          const files = fs.readdirSync(fullPDir).filter(f => f.endsWith('.jsonl'));
+          for (const f of files) {
+            const fullPath = path.join(fullPDir, f);
+            const sessionId = f.replace('.jsonl', '');
+            const isMetaActive = activeSessionMeta.has(sessionId);
+            
+            const { turns, latestMessageTimestamp } = readLastRawTurns(fullPath, 10);
+            const st = fs.statSync(fullPath);
+            const effectiveTime = latestMessageTimestamp || (isMetaActive ? st.mtimeMs : 0);
+
+            if (effectiveTime >= cutoffTime || isMetaActive) {
+              foundSessions.push({
+                sessionId,
+                projectFolder: pDir,
+                transcriptPath: fullPath,
+                fileSize: st.size,
+                mtimeMs: st.mtimeMs,
+                messageTimeMs: effectiveTime,
+                messageTimeIso: new Date(effectiveTime).toISOString(),
+                ageMinutes: Math.max(0, Math.round((now - effectiveTime) / 60000)),
+                turns
+              });
+            }
+          }
+        } catch (e) {}
+      }
+    }
+
+    let activeCount = 0;
+    let limitedCount = 0;
+    const currentSessionIds = new Set(foundSessions.map(s => s.sessionId));
+
+    for (const [sid] of state.agents) {
+      if (!currentSessionIds.has(sid)) {
+        state.agents.delete(sid);
+      }
+    }
+
+    for (const s of foundSessions) {
+      const meta = activeSessionMeta.get(s.sessionId) || {};
+      const pid = meta.pid || null;
+      const isProcessAlive = pid ? alivePids.has(pid) : false;
+      const sessionName = meta.name || s.sessionId.slice(0, 8);
+      const cwd = meta.cwd || (s.projectFolder ? s.projectFolder.replace(/^c--/, 'C:\\').replace(/-/g, '\\') : '');
+      const isEnabled = !(config.disabledSessionIds || []).includes(s.sessionId);
+
+      let agent = state.agents.get(s.sessionId);
+      if (!agent) {
+        agent = {
+          sessionId: s.sessionId,
+          name: sessionName,
+          projectFolder: s.projectFolder,
+          cwd,
+          pid,
+          enabled: isEnabled,
+          isProcessAlive,
+          transcriptPath: s.transcriptPath,
+          fileSize: s.fileSize,
+          messageTimeMs: s.messageTimeMs,
+          lastActivityIso: s.messageTimeIso,
+          ageMinutes: s.ageMinutes,
+          status: config.globalPaused ? 'PAUSED' : (!isEnabled ? 'DISABLED' : (isProcessAlive ? 'ACTIVE' : 'IDLE')),
+          llmEvaluation: null,
+          limitNotice: null,
+          lastPrompt: '',
+          lastAssistantMessage: '',
+          rawRecentTurns: s.turns,
+          model: 'claude-opus',
+          tokenUsage: null,
+          verification: null,
+          resumedCount: 0,
+          lastResumeAttemptAt: null,
+        };
+        state.agents.set(s.sessionId, agent);
+        addEvent('INFO', agent.sessionId, agent.name, `Discovered active agent session (PID ${pid || 'none'}, last message ${s.ageMinutes}m ago)`);
+      } else {
+        agent.name = meta.name || agent.name;
+        agent.cwd = meta.cwd || agent.cwd;
+        agent.pid = pid || agent.pid;
+        agent.enabled = isEnabled;
+        agent.isProcessAlive = isProcessAlive;
+        agent.fileSize = s.fileSize;
+        agent.messageTimeMs = s.messageTimeMs;
+        agent.lastActivityIso = s.messageTimeIso;
+        agent.ageMinutes = s.ageMinutes;
+        agent.rawRecentTurns = s.turns;
+      }
+
+      let latestPromptText = '';
+      let latestAssistantText = '';
+      let turnModel = agent.model;
+
+      for (const obj of s.turns) {
+        if (obj.type === 'last-prompt' && obj.lastPrompt) {
+          latestPromptText = obj.lastPrompt;
+        } else if (obj.type === 'user' && obj.message) {
+          if (typeof obj.message.content === 'string') latestPromptText = obj.message.content;
+          else if (Array.isArray(obj.message.content)) {
+            const firstText = obj.message.content.find(c => c.type === 'text' || typeof c === 'string');
+            if (firstText) latestPromptText = firstText.text || firstText;
+          }
+        } else if (obj.type === 'assistant' && obj.message) {
+          if (obj.message.model) turnModel = obj.message.model;
+          if (obj.message.usage) agent.tokenUsage = obj.message.usage;
+          if (obj.message.content) {
+            if (typeof obj.message.content === 'string') latestAssistantText = obj.message.content;
+            else if (Array.isArray(obj.message.content)) {
+              for (const block of obj.message.content) {
+                if (block.type === 'text') latestAssistantText += block.text + ' ';
+                else if (block.type === 'tool_use') latestAssistantText += `[Tool: ${block.name}] `;
+              }
+            }
+          }
+        }
+      }
+
+      if (latestPromptText) agent.lastPrompt = latestPromptText.slice(0, 300);
+      if (latestAssistantText) agent.lastAssistantMessage = latestAssistantText.slice(0, 500);
+      agent.model = turnModel;
+
+      const features = getAgentEffectiveFeatures(agent.sessionId);
+
+      if (config.globalPaused) {
+        agent.status = 'PAUSED';
+      } else if (!agent.enabled) {
+        agent.status = 'DISABLED';
+      } else if (agent.limitNotice && agent.status === 'LIMITED') {
+        limitedCount++;
+        if (agent.limitNotice.resetAtMs && now >= agent.limitNotice.resetAtMs && features.autoContinue) {
+          dispatchPromptToAgent(agent, 'AUTO_CONTINUE', PROMPT_AUTO_CONTINUE, 'LLM-Verified Reset Reached');
+        }
+      } else if (agent.status === 'IDLE') {
+        // Autonomous completion triggers if enabled
+        const isRecentTurn = agent.ageMinutes < (config.lookbackHours || 6) * 60;
+        if (isRecentTurn && agent.lastAutonomousPromptTurn !== agent.lastActivityIso && agent.rawRecentTurns && agent.rawRecentTurns.length > 0) {
+          const lastTurn = agent.rawRecentTurns[agent.rawRecentTurns.length - 1];
+          const isAssistantCompleted = lastTurn?.type === 'assistant' || lastTurn?.message?.role === 'assistant';
+          
+          if (isAssistantCompleted) {
+            if (features.autoFix) {
+              dispatchPromptToAgent(agent, 'AUTO_FIX', getPromptForAction('autofix'), 'Autonomous Task Completion Review');
+            } else if (features.autoImprove) {
+              dispatchPromptToAgent(agent, 'AUTO_IMPROVE', getPromptForAction('autoimprove'), 'Autonomous Deep Improvement Loop');
+            }
+          }
+        }
+      } else if (agent.status === 'ACTIVE' || agent.status === 'RESUMING' || agent.status === 'VERIFYING' || agent.status === 'AUTO_FIXING' || agent.status === 'AUTO_IMPROVING') {
+        activeCount++;
+      }
+    }
+
+    state.stats.totalScanned = state.agents.size;
+    state.stats.activeRunning = activeCount;
+    state.stats.limited = limitedCount;
+    state.lastScanAt = new Date().toISOString();
+
+    broadcastSSE('status', getSanitizedStatus());
+  } catch (e) {
+    console.error('Scan error:', e);
+  }
+}
+
+function dispatchPromptToAgent(agent, actionType = 'AUTO_CONTINUE', promptText = PROMPT_AUTO_CONTINUE, triggerReason = 'LLM Triggered') {
+  if (config.globalPaused) return;
+  if (!agent.enabled) return;
+  if (agent.status === 'RESUMING' || agent.status === 'VERIFYING' || agent.status === 'AUTO_FIXING' || agent.status === 'AUTO_IMPROVING') return;
+
+  const nowMs = Date.now();
+  let nextStatus = 'RESUMING';
+  let eventType = 'RESUME_TRIGGERED';
+  let eventMsg = `Instructing agent to "${promptText.slice(0, 30)}..." (${triggerReason})`;
+
+  if (actionType === 'AUTO_FIX') {
+    nextStatus = 'AUTO_FIXING';
+    eventType = 'AUTO_FIX_TRIGGERED';
+    eventMsg = `🛠️ Session complete: Dispatched Auto-Fix & Pixel-Perfect Bug Audit loop (${triggerReason})`;
+  } else if (actionType === 'AUTO_IMPROVE') {
+    nextStatus = 'AUTO_IMPROVING';
+    eventType = 'AUTO_IMPROVE_TRIGGERED';
+    eventMsg = `🚀 Session complete: Dispatched Auto-Improve Optimization & Polish loop (${triggerReason})`;
+  }
+
+  agent.status = nextStatus;
+  agent.lastResumeAttemptAt = nowMs;
+  agent.resumedCount = (agent.resumedCount || 0) + 1;
+  agent.lastAutonomousPromptTurn = agent.lastActivityIso;
+
+  addEvent(eventType, agent.sessionId, agent.name, eventMsg, {
+    actionType,
+    triggerReason,
+    cwd: agent.cwd
+  });
+
+  const resumeRecord = {
+    id: 'act_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    sessionId: agent.sessionId,
+    sessionName: agent.name,
+    triggeredAt: new Date().toISOString(),
+    triggerReason,
+    actionType,
+    status: 'IN_PROGRESS',
+    verificationDetails: null,
+  };
+  state.resumes.unshift(resumeRecord);
+
+  try {
+    if (!fs.existsSync(AM_QUEUE_DIR)) fs.mkdirSync(AM_QUEUE_DIR, { recursive: true });
+    const qFile = path.join(AM_QUEUE_DIR, `${agent.sessionId}.json`);
+    fs.writeFileSync(qFile, JSON.stringify({ reason: actionType, prompt: promptText, createdAt: nowMs }), 'utf8');
+  } catch (e) {}
+
+  const targetCwd = agent.cwd && fs.existsSync(agent.cwd) ? agent.cwd : HOME;
+  const args = ['--resume', agent.sessionId, '-p', promptText, '--permission-mode', 'auto', '--output-format', 'stream-json'];
+
+  let child;
+  try {
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
+    child = spawn(CLAUDE_BIN, args, {
+      cwd: targetCwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true
+    });
+  } catch (err) {
+    agent.status = 'IDLE';
+    resumeRecord.status = 'FAILED';
+    resumeRecord.error = err.message;
+    addEvent('VERIFY_FAILED', agent.sessionId, agent.name, `Failed to dispatch action: ${err.message}`);
+    return;
+  }
+
+  agent.status = 'VERIFYING';
+  startVerificationLoop(agent, resumeRecord, nowMs);
+}
+
+function triggerResumeForAgent(agent, triggerReason = 'LLM Triggered Continue') {
+  return dispatchPromptToAgent(agent, 'AUTO_CONTINUE', PROMPT_AUTO_CONTINUE, triggerReason);
+}
+
+function startVerificationLoop(agent, resumeRecord, startMs) {
+  const initialSize = agent.fileSize || 0;
+  const initialMtime = agent.mtimeMs || 0;
+  const checkInterval = 2000;
+  const timeoutMs = (config.verificationTimeoutSeconds || 60) * 1000;
+
+  let elapsed = 0;
+  const timer = setInterval(() => {
+    elapsed += checkInterval;
+
+    try {
+      if (fs.existsSync(agent.transcriptPath)) {
+        const stats = fs.statSync(agent.transcriptPath);
+        const { turns } = readLastRawTurns(agent.transcriptPath, 8);
+
+        let foundNewAssistantTurn = false;
+        let activeError = null;
+
+        for (const obj of turns) {
+          if (obj.type === 'assistant' && obj.message) {
+            const t = obj.timestamp ? new Date(obj.timestamp).getTime() : 0;
+            if (t >= startMs - 2000) {
+              foundNewAssistantTurn = true;
+            }
+          }
+          if (obj.isApiErrorMessage) activeError = obj;
+        }
+
+        const sizeGrew = stats.size > initialSize;
+        const mtimeUpdated = stats.mtimeMs > initialMtime;
+
+        if ((foundNewAssistantTurn || (sizeGrew && mtimeUpdated)) && !activeError) {
+          clearInterval(timer);
+          agent.status = 'ACTIVE';
+          agent.limitNotice = null;
+          agent.verification = {
+            verified: true,
+            verifiedAt: new Date().toISOString(),
+            latencyMs: elapsed,
+            fileSizeChange: stats.size - initialSize,
+            status: 'VERIFIED_RUNNING'
+          };
+
+          resumeRecord.status = 'VERIFIED_WORKING';
+          resumeRecord.verifiedAt = new Date().toISOString();
+          resumeRecord.verificationDetails = agent.verification;
+
+          state.stats.resumedAndVerified++;
+          addEvent('VERIFIED_WORKING', agent.sessionId, agent.name, `Agent verified running! Responded in ${(elapsed/1000).toFixed(1)}s (+${stats.size - initialSize}B)`, agent.verification);
+          broadcastSSE('status', getSanitizedStatus());
+          return;
+        }
+      }
+    } catch (e) {}
+
+    if (elapsed >= timeoutMs) {
+      clearInterval(timer);
+      if (agent.status === 'VERIFYING') {
+        agent.status = 'IDLE';
+        resumeRecord.status = 'TIMEOUT_UNVERIFIED';
+        addEvent('VERIFY_FAILED', agent.sessionId, agent.name, `Verification timed out after ${config.verificationTimeoutSeconds || 60}s`);
+        broadcastSSE('status', getSanitizedStatus());
+      }
+    }
+  }, checkInterval);
+}
+
+const sseClients = new Set();
+
+function broadcastSSE(event, data) {
+  const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(msg);
+    } catch (e) {
+      sseClients.delete(client);
+    }
+  }
+}
+
+function getSanitizedStatus() {
+  const agentList = Array.from(state.agents.values()).map(a => ({
+    sessionId: a.sessionId,
+    name: a.name,
+    projectFolder: a.projectFolder,
+    cwd: a.cwd,
+    pid: a.pid,
+    enabled: a.enabled,
+    isProcessAlive: a.isProcessAlive,
+    fileSize: a.fileSize,
+    mtimeMs: a.mtimeMs,
+    messageTimeMs: a.messageTimeMs,
+    lastActivityIso: a.lastActivityIso,
+    ageMinutes: a.ageMinutes,
+    status: a.status,
+    llmEvaluation: a.llmEvaluation,
+    limitNotice: a.limitNotice,
+    lastPrompt: a.lastPrompt,
+    lastAssistantMessage: a.lastAssistantMessage,
+    model: a.model,
+    tokenUsage: a.tokenUsage,
+    verification: a.verification,
+    resumedCount: a.resumedCount,
+    features: getAgentEffectiveFeatures(a.sessionId),
+    overrides: config.agentOverrides?.[a.sessionId] || null,
+  }));
+
+  agentList.sort((a, b) => (b.messageTimeMs || 0) - (a.messageTimeMs || 0));
+
+  return {
+    systemTime: new Date().toISOString(),
+    serverStartedAt: state.startedAt,
+    lastScanAt: state.lastScanAt,
+    config,
+    hibernation: {
+      pending: state.hibernation.pending,
+      reason: state.hibernation.reason,
+      targetTimestamp: state.hibernation.targetTimestamp
+    },
+    stats: state.stats,
+    agents: agentList,
+    resumes: state.resumes.slice(0, 50),
+  };
+}
+
+const server = http.createServer((req, res) => {
+  try {
+    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const pathname = parsedUrl.pathname;
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (pathname === '/api/stream') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+      res.write(`data: ${JSON.stringify({ type: 'INIT', time: new Date().toISOString() })}\n\n`);
+      sseClients.add(res);
+
+      req.on('close', () => {
+        sseClients.delete(res);
+      });
+      return;
+    }
+
+    if (pathname === '/api/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(getSanitizedStatus()));
+      return;
+    }
+
+    if (pathname === '/api/events') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(state.events));
+      return;
+    }
+
+    // POST /api/pause (Toggle Global Pause)
+    if (pathname === '/api/pause' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { paused } = JSON.parse(body || '{}');
+          config.globalPaused = typeof paused === 'boolean' ? paused : !config.globalPaused;
+          saveConfig();
+          addEvent('INFO', null, 'SYSTEM', `Global Monitoring ${config.globalPaused ? 'PAUSED' : 'RESUMED'}`);
+          scanAgents();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, globalPaused: config.globalPaused }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    // POST /api/shutdown (Graceful Exit Server)
+    if (pathname === '/api/shutdown' && req.method === 'POST') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, message: 'Server shutting down gracefully' }));
+      console.log('\n[Agent Sentinel]: Received shutdown command. Stopping server...');
+      setTimeout(() => {
+        process.exit(0);
+      }, 500);
+      return;
+    }
+
+    if (pathname === '/api/config') {
+      if (req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+          try {
+            const updates = JSON.parse(body || '{}');
+            config = { ...config, ...updates };
+            saveConfig();
+            addEvent('INFO', null, 'SYSTEM', 'Configuration updated', { config });
+            scanAgents();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, config }));
+          } catch (e) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: e.message }));
+          }
+        });
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, config }));
+      return;
+    }
+
+    if (pathname === '/api/toggle-agent' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { sessionId, enabled } = JSON.parse(body || '{}');
+          if (!sessionId) throw new Error('sessionId required');
+          
+          config.disabledSessionIds = config.disabledSessionIds || [];
+          if (enabled) {
+            config.disabledSessionIds = config.disabledSessionIds.filter(id => id !== sessionId);
+          } else {
+            if (!config.disabledSessionIds.includes(sessionId)) {
+              config.disabledSessionIds.push(sessionId);
+            }
+          }
+          saveConfig();
+          
+          const agent = state.agents.get(sessionId);
+          if (agent) {
+            agent.enabled = enabled;
+            agent.status = enabled ? (agent.isProcessAlive ? 'ACTIVE' : 'IDLE') : 'DISABLED';
+            addEvent('INFO', sessionId, agent.name, `Agent monitoring ${enabled ? 'ENABLED' : 'DISABLED'}`);
+          }
+          scanAgents();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, enabled, disabledSessionIds: config.disabledSessionIds }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/cancel-hibernation' && req.method === 'POST') {
+      const cancelled = cancelHibernation();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, cancelled }));
+      return;
+    }
+
+    if (pathname === '/api/raw-agent-context') {
+      const list = Array.from(state.agents.values()).map(a => ({
+        sessionId: a.sessionId,
+        name: a.name,
+        cwd: a.cwd,
+        pid: a.pid,
+        enabled: a.enabled,
+        isProcessAlive: a.isProcessAlive,
+        ageMinutes: a.ageMinutes,
+        messageTimeIso: a.lastActivityIso,
+        currentStatus: a.status,
+        llmEvaluation: a.llmEvaluation,
+        rawRecentTurns: a.rawRecentTurns
+      }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, agents: list }));
+      return;
+    }
+
+    if (pathname === '/api/supervisor/submit-evaluation' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const evaluations = JSON.parse(body || '[]');
+          const evalList = Array.isArray(evaluations) ? evaluations : [evaluations];
+
+          for (const ev of evalList) {
+            const agent = state.agents.get(ev.sessionId);
+            if (!agent) continue;
+
+            agent.llmEvaluation = {
+              status: ev.status || agent.status,
+              reasoning: ev.llmReasoning || '',
+              summary: ev.summary || '',
+              isLimited: !!ev.isLimited,
+              limitKind: ev.limitDetails?.kind || null,
+              resetAtIso: ev.limitDetails?.resetAtIso || null,
+              resetAtMs: ev.limitDetails?.resetAtMs || null,
+              evaluatedAt: new Date().toISOString()
+            };
+
+            if (config.globalPaused) {
+              agent.status = 'PAUSED';
+            } else if (agent.enabled) {
+              if (ev.isLimited && ev.limitDetails) {
+                agent.status = 'LIMITED';
+                agent.limitNotice = {
+                  kind: ev.limitDetails.kind || 'session_limit',
+                  rawNotice: ev.limitDetails.rawNotice || ev.llmReasoning,
+                  detectedAt: new Date().toISOString(),
+                  resetAtMs: ev.limitDetails.resetAtMs || (Date.now() + 3600000),
+                  resetAtIso: ev.limitDetails.resetAtIso || new Date(Date.now() + 3600000).toISOString()
+                };
+                addEvent('LIMIT_DETECTED', agent.sessionId, agent.name, `🧠 LLM Identified Limit: ${ev.summary}`, ev.limitDetails);
+
+                if (agent.limitNotice.kind === 'weekly_limit') {
+                  triggerHibernationSequence(`Agent ${agent.name} reached weekly limit`);
+                }
+              } else {
+                if (agent.status === 'LIMITED' && !ev.isLimited) {
+                  agent.limitNotice = null;
+                  addEvent('INFO', agent.sessionId, agent.name, `🧠 LLM Determined Limit Cleared: ${ev.summary}`);
+                }
+                if (agent.status !== 'RESUMING' && agent.status !== 'VERIFYING') {
+                  agent.status = ev.status || (agent.isProcessAlive ? 'ACTIVE' : 'IDLE');
+                }
+              }
+            } else {
+              agent.status = 'DISABLED';
+            }
+          }
+
+          scanAgents();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, evaluatedCount: evalList.length }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/toggle-agent-feature' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { sessionId, feature, enabled } = JSON.parse(body || '{}');
+          if (!sessionId) throw new Error('sessionId required');
+          if (!['autoContinue', 'autoFix', 'autoImprove'].includes(feature)) {
+            throw new Error(`Invalid feature: ${feature}. Must be autoContinue, autoFix, or autoImprove`);
+          }
+
+          config.agentOverrides = config.agentOverrides || {};
+          config.agentOverrides[sessionId] = config.agentOverrides[sessionId] || {};
+          config.agentOverrides[sessionId][feature] = !!enabled;
+          saveConfig();
+
+          const features = getAgentEffectiveFeatures(sessionId);
+          addEvent('INFO', sessionId, state.agents.get(sessionId)?.name || sessionId, `Feature toggle updated: ${feature} = ${enabled}`);
+          broadcastSSE('status', getSanitizedStatus());
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, sessionId, feature, enabled: !!enabled, features }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/trigger-agent-action' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { sessionId, action } = JSON.parse(body || '{}');
+          const agent = state.agents.get(sessionId);
+          if (!agent) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Agent not found' }));
+            return;
+          }
+
+          if (action === 'autofix') {
+            dispatchPromptToAgent(agent, 'AUTO_FIX', getPromptForAction('autofix'), 'Manual Auto-Fix Trigger');
+          } else if (action === 'autoimprove') {
+            dispatchPromptToAgent(agent, 'AUTO_IMPROVE', getPromptForAction('autoimprove'), 'Manual Auto-Improve Trigger');
+          } else {
+            dispatchPromptToAgent(agent, 'AUTO_CONTINUE', getPromptForAction('continue'), 'Manual Dispatch');
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, message: `Dispatched ${action || 'continue'} to ${agent.name}` }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/prompts' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        authorizeSubagents: config.authorizeSubagents !== false,
+        prompts: {
+          continue: {
+            title: 'Auto Continue',
+            action: 'continue',
+            trigger: 'Triggered when session rate limit or 5-hour quota ceiling resets',
+            prompt: getPromptForAction('continue')
+          },
+          autofix: {
+            title: 'Auto Fix (Adversarial Hardening Loop)',
+            action: 'autofix',
+            trigger: 'Triggered when agent completes its task with Auto-Fix enabled',
+            prompt: getPromptForAction('autofix')
+          },
+          autoimprove: {
+            title: 'Auto Improve (Optimization & Architecture Loop)',
+            action: 'autoimprove',
+            trigger: 'Triggered when agent completes its task with Auto-Improve enabled',
+            prompt: getPromptForAction('autoimprove')
+          }
+        }
+      }));
+      return;
+    }
+
+    if (pathname === '/api/resume-agent' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        try {
+          const { sessionId } = JSON.parse(body || '{}');
+          const agent = state.agents.get(sessionId);
+          if (!agent) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Agent not found' }));
+            return;
+          }
+          triggerResumeForAgent(agent, 'Manual Dispatch');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, message: `Resume command sent to ${agent.name}` }));
+        } catch (e) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      });
+      return;
+    }
+
+    if (pathname === '/api/scan' && req.method === 'POST') {
+      scanAgents();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, message: 'Scan complete' }));
+      return;
+    }
+
+    let filePath = path.join(__dirname, 'public', pathname === '/' ? 'index.html' : pathname);
+    if (!fs.existsSync(filePath)) {
+      filePath = path.join(__dirname, 'public', 'index.html');
+    }
+
+    const ext = path.extname(filePath);
+    const mimeTypes = {
+      '.html': 'text/html; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.js': 'application/javascript; charset=utf-8',
+      '.json': 'application/json; charset=utf-8',
+      '.svg': 'image/svg+xml',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.webp': 'image/webp'
+    };
+    const contentType = mimeTypes[ext] || 'text/plain';
+
+    try {
+      const data = fs.readFileSync(filePath);
+      res.writeHead(200, { 'Content-Type': contentType });
+      res.end(data);
+    } catch (e) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found');
+    }
+  } catch (err) {
+    console.error('Server error:', err);
+    try {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('Internal Server Error');
+    } catch (_) {}
+  }
+});
+
+function startServer(targetPort, maxAttempts = 10) {
+  server.once('error', async (err) => {
+    if (err.code === 'EADDRINUSE') {
+      // Test if occupant is an existing Agent Sentinel instance
+      let isSentinel = false;
+      try {
+        const checkRes = await new Promise((resolve) => {
+          const req = http.get(`http://localhost:${targetPort}/api/status`, { timeout: 1500 }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+              try {
+                const json = JSON.parse(data);
+                resolve(!!json.systemTime && !!json.agents);
+              } catch (_) { resolve(false); }
+            });
+          });
+          req.on('error', () => resolve(false));
+          req.on('timeout', () => { req.destroy(); resolve(false); });
+        });
+        isSentinel = checkRes;
+      } catch (_) { isSentinel = false; }
+
+      if (isSentinel) {
+        console.log(`\n[Agent Sentinel]: An instance is already running on port ${targetPort}.`);
+        console.log(`Access active dashboard at: http://localhost:${targetPort}\n`);
+        process.exit(0);
+      } else {
+        console.warn(`\n[Agent Sentinel Warning]: Port ${targetPort} is occupied by an unrelated application.`);
+        if (maxAttempts > 1) {
+          const nextPort = targetPort + 1;
+          console.warn(`[Agent Sentinel]: Attempting fallback port http://localhost:${nextPort}...\n`);
+          setTimeout(() => startServer(nextPort, maxAttempts - 1), 200);
+        } else {
+          console.error(`[Agent Sentinel Error]: Could not find an available port after multiple attempts. Please specify a free port via PORT=xxxx node server.js\n`);
+          process.exit(1);
+        }
+      }
+    } else {
+      console.error('[Agent Sentinel Server Error]:', err);
+      process.exit(1);
+    }
+  });
+
+  server.listen(targetPort, '0.0.0.0', () => {
+    console.log(`\n======================================================`);
+    console.log(`  AGENT SENTINEL — LLM COGNITIVE MONITOR`);
+    console.log(`  Dashboard: http://localhost:${targetPort}`);
+    console.log(`======================================================\n`);
+
+    addEvent('INFO', null, 'SYSTEM', `Agent Sentinel Server Online on Port ${targetPort}`);
+    scanAgents();
+    setInterval(() => {
+      scanAgents();
+    }, 3000);
+  });
+}
+
+startServer(PORT);

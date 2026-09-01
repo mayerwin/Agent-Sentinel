@@ -1,0 +1,13 @@
+{
+  "globalPaused": false,
+  "lookbackHours": 6,
+  "recheckIntervalSeconds": 120,
+  "hibernateOnWeeklyLimit": false,
+  "autoResumeEnabled": true,
+  "defaultAutoContinue": true,
+  "defaultAutoFix": false,
+  "defaultAutoImprove": false,
+  "verificationTimeoutSeconds": 60,
+  "disabledSessionIds": [],
+  "agentOverrides": {}
+}

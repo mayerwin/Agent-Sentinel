@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Code Sentinel — AI Cognitive Supervisor & Auto-Resume Monitor</title>
+  <meta name="description" content="AI Cognitive Supervisor for Claude Code agents with deep LLM interpretation of rate limits, autonomous resumption, verification, and power management.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+      <div class="header-brand">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"/>
+            <path d="M12 6v6l4 2"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="header-title">Agent Sentinel</h1>
+          <div class="header-subtitle">
+            <span id="headerSubtitleText">🧠 LLM Cognitive Supervisor Active</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="header-controls">
+        <div class="sentinel-badge live" id="sentinelStatusBadge">
+          <span class="pulse-dot"></span>
+          <span class="badge-text" id="sentinelStatusText">LLM COGNITIVE MONITOR</span>
+        </div>
+
+        <div class="system-time-tag" id="systemClock">00:00:00</div>
+
+        <!-- View Prompts Button -->
+        <button class="btn btn-secondary btn-sm" id="btnOpenPrompts" title="View and inspect autonomous prompt templates">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          Prompts
+        </button>
+
+        <!-- Settings Cog Button -->
+        <button class="btn btn-secondary btn-icon" id="btnOpenSettings" title="Configure Monitor Settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+
+        <!-- Scan Button -->
+        <button class="btn btn-secondary btn-sm" id="btnScanNow" title="Scan active agents now">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+          Scan
+        </button>
+
+        <!-- Global Pause / Resume Button -->
+        <button class="btn btn-secondary btn-sm" id="btnTogglePause" title="Pause or Resume global monitoring">
+          <span id="pauseIcon">⏸</span>
+          <span id="pauseLabel">Pause</span>
+        </button>
+
+        <!-- Exit Server Button -->
+        <button class="btn btn-sm btn-exit" id="btnExitServer" title="Shut down Sentinel server">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+            <line x1="12" y1="2" x2="12" y2="12"/>
+          </svg>
+          Exit
+        </button>
+      </div>
+    </header>
+
+    <!-- Active Hibernation Warning Banner -->
+    <div class="hibernation-alert-banner" id="hibernationBanner" style="display: none;">
+      <div class="hibernation-alert-content">
+        <span class="hibernation-icon">💤</span>
+        <div>
+          <div class="hibernation-alert-title">WEEKLY LIMIT REACHED — PC HIBERNATING IN <span id="hibernateCountdownSec">30</span>s</div>
+          <div class="hibernation-alert-desc" id="hibernationDesc">Claude agent exhausted weekly quota. Hibernation scheduled to conserve power.</div>
+        </div>
+      </div>
+      <button class="btn btn-action btn-danger" id="btnCancelHibernate">Cancel Hibernation</button>
+    </div>
+
+    <!-- Main Content Layout -->
+    <main class="main-layout">
+      <!-- Stats Overview Bar -->
+      <section class="stats-grid" id="statsOverview">
+        <div class="stat-card">
+          <div class="stat-icon icon-blue">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-label">Active Agents (<span id="statLookbackLabel">Past 6h</span>)</div>
+            <div class="stat-value" id="statTotalAgents">0</div>
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-icon icon-green">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-label">Active / Working</div>
+            <div class="stat-value" id="statActiveAgents">0</div>
+          </div>
+        </div>
+
+        <div class="stat-card" id="statCardLimited">
+          <div class="stat-icon icon-amber">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-label">Rate / Weekly Limited</div>
+            <div class="stat-value" id="statLimitedAgents">0</div>
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-icon icon-cyan">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+          </div>
+          <div class="stat-content">
+            <div class="stat-label">Auto-Resumed & Verified</div>
+            <div class="stat-value" id="statResumedVerified">0</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Active Rate Limits Hero Section -->
+      <section class="limit-hero-section" id="limitHeroSection" style="display: none;">
+        <div class="limit-hero-card">
+          <div class="limit-hero-header">
+            <div class="limit-hero-title">
+              <span class="warning-icon-pulse">⚠️</span>
+              <div>
+                <h2>LLM Detected Rate / Weekly Limit</h2>
+                <p id="limitHeroDesc">An agent reached its session or weekly token quota. Standing by to automatically dispatch "continue" when the reset arrives.</p>
+              </div>
+            </div>
+            <div class="countdown-container">
+              <div class="countdown-label">AUTO-RESUME COUNTDOWN</div>
+              <div class="countdown-timer" id="heroCountdownTimer">00:00:00</div>
+              <div class="reset-target-time" id="heroResetTarget">Resets at: --</div>
+            </div>
+          </div>
+          <div class="limit-agent-strip" id="limitAgentStrip"></div>
+        </div>
+      </section>
+
+      <!-- Agents & Events Split -->
+      <div class="content-split">
+        <section class="agents-section">
+          <div class="section-toolbar">
+            <div class="section-title-group">
+              <h2 class="section-title">Claude Code Agents</h2>
+              <span class="badge-count" id="agentCountBadge">0</span>
+            </div>
+
+            <div class="toolbar-controls">
+              <div class="filter-tabs">
+                <button class="filter-tab active" data-filter="all">All</button>
+                <button class="filter-tab" data-filter="active">Active</button>
+                <button class="filter-tab" data-filter="limited">Limited</button>
+                <button class="filter-tab" data-filter="idle">Idle</button>
+                <button class="filter-tab" data-filter="disabled">Paused</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="agents-grid" id="agentsContainer">
+            <div class="empty-state" id="agentsEmptyState">
+              <div class="spinner"></div>
+              <p>Scanning active Claude Code processes and transcripts...</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Right Side: Event Stream -->
+        <section class="events-section">
+          <div class="section-toolbar">
+            <div class="section-title-group">
+              <h2 class="section-title">AI Sentinel Audit Stream</h2>
+              <span class="live-tag">LIVE SSE</span>
+            </div>
+            <div class="toolbar-actions">
+              <button class="btn btn-outline btn-xs" id="btnClearLogs">Clear</button>
+            </div>
+          </div>
+
+          <div class="events-feed" id="eventsContainer"></div>
+        </section>
+      </div>
+    </main>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settingsModal" style="display: none;">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <span class="modal-icon">⚙️</span>
+            <h3>Sentinel Configuration</h3>
+          </div>
+          <button class="modal-close-btn" id="btnCloseSettings">&times;</button>
+        </div>
+
+        <div class="modal-body">
+          <!-- Lookback Window -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-title" for="inputLookback">Lookback Window (Hours)</label>
+              <span class="setting-desc">Only inspect agents with messages timestamped in the last N hours.</span>
+            </div>
+            <div class="setting-input-wrap">
+              <input type="number" id="inputLookback" min="1" max="168" value="6" class="setting-number-input">
+              <span class="input-suffix">hrs</span>
+            </div>
+          </div>
+
+          <!-- Recheck Interval -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-title" for="inputRecheck">Supervision Recheck Interval</label>
+              <span class="setting-desc">How often the AI supervisor evaluates transcript state.</span>
+            </div>
+            <div class="setting-input-wrap">
+              <input type="number" id="inputRecheck" min="15" max="3600" value="120" class="setting-number-input">
+              <span class="input-suffix">sec</span>
+            </div>
+          </div>
+
+          <!-- Hibernate on Weekly Limit -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">Hibernate PC on Weekly Limit</span>
+              <span class="setting-desc">Execute <code>shutdown /h</code> after a 30s grace period when weekly limit is reached.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="modalToggleHibernate">
+              <span class="slider round"></span>
+            </label>
+          </div>
+
+          <!-- Default Auto-Continue on Rate Limit -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">Default: Auto-Continue</span>
+              <span class="setting-desc">Automatically resume rate-limited agents with <code>continue</code> when limits reset.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="modalToggleAutoContinue" checked>
+              <span class="slider round"></span>
+            </label>
+          </div>
+
+          <!-- Default Auto-Fix on Task Completion -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">Default: Auto-Fix on Completion</span>
+              <span class="setting-desc">Automatically dispatch multi-pass bug & pixel-perfect audit loop when a task is completed.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="modalToggleAutoFix">
+              <span class="slider round"></span>
+            </label>
+          </div>
+
+          <!-- Default Auto-Improve on Task Completion (Risky) -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">Default: Auto-Improve on Completion <span style="color:#f59e0b; font-size:11px;">⚡ Risky</span></span>
+              <span class="setting-desc">Automatically prompt completed agents with deep architecture, UX, & performance optimization loops.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="modalToggleAutoImprove">
+              <span class="slider round"></span>
+            </label>
+          </div>
+
+          <!-- Authorize Spawning Subagents -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <span class="setting-title">Authorize Spawning Subagents</span>
+              <span class="setting-desc">Explicitly authorize agents to spawn and coordinate dedicated subagents during Auto-Fix and Auto-Improve passes.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="modalToggleAuthorizeSubagents" checked>
+              <span class="slider round"></span>
+            </label>
+          </div>
+
+          <!-- Verification Timeout -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-title" for="inputVerifyTimeout">Verification Window (Seconds)</label>
+              <span class="setting-desc">Duration to wait for verified token stream after resuming.</span>
+            </div>
+            <div class="setting-input-wrap">
+              <input type="number" id="inputVerifyTimeout" min="10" max="300" value="60" class="setting-number-input">
+              <span class="input-suffix">sec</span>
+            </div>
+          </div>
+
+          <!-- Live Prompt Preview Link -->
+          <div style="margin-top: 12px; padding: 12px; background: rgba(99,102,241,0.06); border: 1px dashed rgba(99,102,241,0.25); border-radius: 8px; display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <div style="font-size: 13px; font-weight: 600; color: #cbd5e1;">Live Prompt Templates</div>
+              <div style="font-size: 11.5px; color: #94a3b8;">Inspect the exact prompt strings dispatched for Auto-Continue, Auto-Fix, and Auto-Improve.</div>
+            </div>
+            <button class="btn btn-secondary btn-xs" id="btnSettingsInspectPrompts">📖 Inspect Prompts</button>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn btn-secondary btn-sm" id="btnCancelSettings">Cancel</button>
+          <button class="btn btn-action btn-sm" id="btnSaveSettings">Save Settings</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompt Inspector Modal -->
+    <div class="modal-overlay" id="promptsModal" style="display: none;">
+      <div class="modal-card" style="max-width: 680px;">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <span class="modal-icon">📖</span>
+            <div>
+              <h3>Autonomous Prompt Inspector</h3>
+              <p class="modal-subtitle">Exact prompts dispatched to Claude Code agents</p>
+            </div>
+          </div>
+          <button class="modal-close-btn" id="btnClosePrompts">&times;</button>
+        </div>
+
+        <div class="modal-body" style="padding-top: 8px;">
+          <!-- Tabs -->
+          <div class="prompt-tabs">
+            <button class="prompt-tab-btn active" data-tab="autofix">🛠️ Auto Fix</button>
+            <button class="prompt-tab-btn" data-tab="autoimprove">🚀 Auto Improve</button>
+            <button class="prompt-tab-btn" data-tab="continue">▶ Auto Continue</button>
+          </div>
+
+          <!-- Tab Content: Auto Fix -->
+          <div class="prompt-tab-content active" id="tabContentAutoFix">
+            <div class="prompt-info-header">
+              <span class="prompt-trigger-badge">Trigger: Task Completion + Auto-Fix Enabled</span>
+              <span class="prompt-subagent-indicator" id="subagentStatusIndicatorFix">● Subagents Authorized</span>
+            </div>
+            <div class="prompt-code-wrap">
+              <pre class="prompt-code-block" id="promptTextAutoFix"></pre>
+              <button class="btn-copy-prompt" data-target="promptTextAutoFix" title="Copy to clipboard">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Copy
+              </button>
+            </div>
+          </div>
+
+          <!-- Tab Content: Auto Improve -->
+          <div class="prompt-tab-content" id="tabContentAutoImprove">
+            <div class="prompt-info-header">
+              <span class="prompt-trigger-badge">Trigger: Task Completion + Auto-Improve Enabled (⚡ Risky)</span>
+              <span class="prompt-subagent-indicator" id="subagentStatusIndicatorImprove">● Subagents Authorized</span>
+            </div>
+            <div class="prompt-code-wrap">
+              <pre class="prompt-code-block" id="promptTextAutoImprove"></pre>
+              <button class="btn-copy-prompt" data-target="promptTextAutoImprove" title="Copy to clipboard">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Copy
+              </button>
+            </div>
+          </div>
+
+          <!-- Tab Content: Auto Continue -->
+          <div class="prompt-tab-content" id="tabContentContinue">
+            <div class="prompt-info-header">
+              <span class="prompt-trigger-badge">Trigger: Rate / Quota Limit Reset Moment Reached</span>
+            </div>
+            <div class="prompt-code-wrap">
+              <pre class="prompt-code-block" id="promptTextContinue">continue</pre>
+              <button class="btn-copy-prompt" data-target="promptTextContinue" title="Copy to clipboard">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                Copy
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn btn-secondary btn-sm" id="btnClosePromptsFooter">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Exit Confirmation Modal -->
+    <div class="modal-overlay" id="exitModal" style="display: none;">
+      <div class="modal-card" style="max-width: 420px;">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <span class="modal-icon">⏻</span>
+            <h3>Exit Agent Sentinel</h3>
+          </div>
+          <button class="modal-close-btn" id="btnCloseExit">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p style="color: #cbd5e1; font-size: 13.5px; line-height: 1.5;">
+            Are you sure you want to stop the Sentinel background server? You can relaunch it at any time from Antigravity by asking <strong>"proceed"</strong>.
+          </p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary btn-sm" id="btnCancelExit">Cancel</button>
+          <button class="btn btn-action btn-danger btn-sm" id="btnConfirmExit">Stop Server</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
