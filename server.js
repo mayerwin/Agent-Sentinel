@@ -982,18 +982,22 @@ const server = http.createServer((req, res) => {
               agent.status = 'PAUSED';
             } else if (agent.enabled) {
               if (ev.isLimited && ev.limitDetails) {
+                const wasAlreadyLimited = (agent.status === 'LIMITED' && agent.limitNotice && Math.abs((agent.limitNotice.resetAtMs || 0) - (ev.limitDetails.resetAtMs || 0)) < 60000);
                 agent.status = 'LIMITED';
                 agent.limitNotice = {
                   kind: ev.limitDetails.kind || 'session_limit',
                   rawNotice: ev.limitDetails.rawNotice || ev.llmReasoning,
-                  detectedAt: new Date().toISOString(),
+                  detectedAt: agent.limitNotice?.detectedAt || new Date().toISOString(),
                   resetAtMs: ev.limitDetails.resetAtMs || (Date.now() + 3600000),
                   resetAtIso: ev.limitDetails.resetAtIso || new Date(Date.now() + 3600000).toISOString()
                 };
-                addEvent('LIMIT_DETECTED', agent.sessionId, agent.name, `🧠 LLM Identified Limit: ${ev.summary}`, ev.limitDetails);
 
-                if (agent.limitNotice.kind === 'weekly_limit') {
-                  triggerHibernationSequence(`Agent ${agent.name} reached weekly limit`);
+                if (!wasAlreadyLimited) {
+                  addEvent('LIMIT_DETECTED', agent.sessionId, agent.name, `🧠 LLM Identified Limit: ${ev.summary}`, ev.limitDetails);
+
+                  if (agent.limitNotice.kind === 'weekly_limit') {
+                    triggerHibernationSequence(`Agent ${agent.name} reached weekly limit`);
+                  }
                 }
               } else {
                 if (agent.status === 'LIMITED' && !ev.isLimited) {
