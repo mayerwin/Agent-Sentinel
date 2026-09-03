@@ -3,10 +3,12 @@
   "lookbackHours": 6,
   "recheckIntervalSeconds": 120,
   "hibernateOnWeeklyLimit": false,
+  "hibernateOnAllCompleted": false,
   "autoResumeEnabled": true,
   "defaultAutoContinue": true,
   "defaultAutoFix": false,
   "defaultAutoImprove": false,
+  "authorizeSubagents": true,
   "verificationTimeoutSeconds": 60,
   "disabledSessionIds": [],
   "agentOverrides": {}

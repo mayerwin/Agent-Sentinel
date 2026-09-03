@@ -114,6 +114,7 @@ let config = {
   lookbackHours: 6,
   recheckIntervalSeconds: 120,
   hibernateOnWeeklyLimit: false,
+  hibernateOnAllCompleted: false,
   autoResumeEnabled: true,
   defaultAutoContinue: true,
   defaultAutoFix: false,
@@ -154,10 +155,12 @@ const state = {
   resumes: [],
   hibernation: {
     pending: false,
+    triggerType: null,
     reason: null,
     targetTimestamp: null,
     timer: null
   },
+  hibernateOnAllCompletedArmed: false,
   stats: {
     totalScanned: 0,
     activeRunning: 0,
@@ -356,26 +359,48 @@ function isPidAlive(pid) {
   }
 }
 
-function triggerHibernationSequence(reason) {
+function triggerHibernationSequence(reason, triggerType = 'weekly_limit') {
   if (config.globalPaused) return;
   if (state.hibernation.pending) return;
-  if (!config.hibernateOnWeeklyLimit) return;
+  if (triggerType === 'weekly_limit' && !config.hibernateOnWeeklyLimit) return;
+  if (triggerType === 'all_completed' && !config.hibernateOnAllCompleted) return;
 
   const graceSeconds = 30;
   const targetTimestamp = Date.now() + graceSeconds * 1000;
 
   state.hibernation.pending = true;
+  state.hibernation.triggerType = triggerType;
   state.hibernation.reason = reason;
   state.hibernation.targetTimestamp = targetTimestamp;
 
-  addEvent('HIBERNATE_TRIGGERED', null, 'SYSTEM', `⚠️ Weekly limit reached! PC hibernation scheduled in ${graceSeconds}s (${reason})`, {
-    targetTimestamp
+  const title = triggerType === 'all_completed'
+    ? `All agents completed! PC hibernation scheduled in ${graceSeconds}s (${reason})`
+    : `⚠️ Weekly limit reached! PC hibernation scheduled in ${graceSeconds}s (${reason})`;
+
+  const alertTitle = triggerType === 'all_completed'
+    ? `ALL AGENTS COMPLETED — PC HIBERNATING IN `
+    : `WEEKLY LIMIT REACHED — PC HIBERNATING IN `;
+
+  addEvent('HIBERNATE_TRIGGERED', null, 'SYSTEM', title, {
+    targetTimestamp,
+    triggerType
   });
-  broadcastSSE('hibernation_status', { pending: true, reason, targetTimestamp });
+  broadcastSSE('hibernation_status', {
+    pending: true,
+    reason,
+    targetTimestamp,
+    triggerType,
+    alertTitle
+  });
 
   state.hibernation.timer = setTimeout(() => {
     if (state.hibernation.pending) {
       addEvent('HIBERNATE_EXECUTED', null, 'SYSTEM', `Executing system hibernation: shutdown /h`);
+      state.hibernateOnAllCompletedArmed = false;
+      if (config.hibernateOnAllCompleted) {
+        config.hibernateOnAllCompleted = false;
+        saveConfig();
+      }
       try {
         exec('shutdown /h', (err) => {
           if (err) console.error('Hibernation error:', err.message);
@@ -391,9 +416,15 @@ function cancelHibernation() {
   if (!state.hibernation.pending) return false;
   if (state.hibernation.timer) clearTimeout(state.hibernation.timer);
   state.hibernation.pending = false;
+  state.hibernation.triggerType = null;
   state.hibernation.reason = null;
   state.hibernation.targetTimestamp = null;
   state.hibernation.timer = null;
+  state.hibernateOnAllCompletedArmed = false;
+  if (config.hibernateOnAllCompleted) {
+    config.hibernateOnAllCompleted = false;
+    saveConfig();
+  }
   addEvent('INFO', null, 'SYSTEM', `PC Hibernation cancelled by user.`);
   broadcastSSE('hibernation_status', { pending: false });
   return true;
@@ -652,6 +683,14 @@ function scanAgents() {
     state.stats.limited = limitedCount;
     state.lastScanAt = new Date().toISOString();
 
+    // Check for Hibernate on All Agents Completed (only if armed while agents were active)
+    if (config.hibernateOnAllCompleted && state.hibernateOnAllCompletedArmed) {
+      if (activeCount === 0 && !state.hibernation.pending && !config.globalPaused) {
+        state.hibernateOnAllCompletedArmed = false;
+        triggerHibernationSequence('All active Claude Code agents have completed their tasks', 'all_completed');
+      }
+    }
+
     broadcastSSE('status', getSanitizedStatus());
   } catch (e) {
     console.error('Scan error:', e);
@@ -872,8 +911,10 @@ function getSanitizedStatus() {
     config,
     hibernation: {
       pending: state.hibernation.pending,
+      triggerType: state.hibernation.triggerType || null,
       reason: state.hibernation.reason,
-      targetTimestamp: state.hibernation.targetTimestamp
+      targetTimestamp: state.hibernation.targetTimestamp,
+      armedOnCompletion: state.hibernateOnAllCompletedArmed
     },
     stats: state.stats,
     agents: agentList,
@@ -962,12 +1003,39 @@ const server = http.createServer((req, res) => {
         req.on('end', () => {
           try {
             const updates = JSON.parse(body || '{}');
+            const wasHibernateOnAllEnabled = !!config.hibernateOnAllCompleted;
+            const willHibernateOnAllBeEnabled = updates.hibernateOnAllCompleted !== undefined
+              ? !!updates.hibernateOnAllCompleted
+              : wasHibernateOnAllEnabled;
+
             config = { ...config, ...updates };
+
+            // Handle arming logic for Hibernate on All Completed
+            if (willHibernateOnAllBeEnabled && !wasHibernateOnAllEnabled) {
+              const currentActiveCount = Array.from(state.agents.values()).filter(a =>
+                a.enabled && (a.status === 'ACTIVE' || a.status === 'RESUMING' || a.status === 'VERIFYING' || a.status === 'AUTO_FIXING' || a.status === 'AUTO_IMPROVING')
+              ).length;
+
+              if (currentActiveCount > 0) {
+                state.hibernateOnAllCompletedArmed = true;
+                addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: ARMED (monitoring ${currentActiveCount} active agent${currentActiveCount > 1 ? 's' : ''})`);
+              } else {
+                state.hibernateOnAllCompletedArmed = false;
+                addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: Enabled, but no agents were currently active. Arming requires an agent to be active when enabled.`);
+              }
+            } else if (!willHibernateOnAllBeEnabled && wasHibernateOnAllEnabled) {
+              state.hibernateOnAllCompletedArmed = false;
+              if (state.hibernation.pending && state.hibernation.triggerType === 'all_completed') {
+                cancelHibernation();
+              }
+              addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: Disarmed.`);
+            }
+
             saveConfig();
             addEvent('INFO', null, 'SYSTEM', 'Configuration updated', { config });
             scanAgents();
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, config }));
+            res.end(JSON.stringify({ ok: true, config, armedOnCompletion: state.hibernateOnAllCompletedArmed }));
           } catch (e) {
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: false, error: e.message }));
@@ -976,7 +1044,7 @@ const server = http.createServer((req, res) => {
         return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, config }));
+      res.end(JSON.stringify({ ok: true, config, armedOnCompletion: state.hibernateOnAllCompletedArmed }));
       return;
     }
 

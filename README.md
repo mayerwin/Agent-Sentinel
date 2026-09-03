@@ -102,6 +102,7 @@ All settings can be toggled in the UI via the **Settings Cog ⚙️** or edited 
 | `lookbackHours` | `number` | `6` | Lookback window in hours for active Claude Code sessions. |
 | `recheckIntervalSeconds` | `number` | `120` | Interval in seconds between cognitive supervision cycles. |
 | `hibernateOnWeeklyLimit` | `boolean` | `false` | If `true`, triggers a 30s grace countdown followed by `shutdown /h` upon weekly limit detection. |
+| `hibernateOnAllCompleted` | `boolean` | `false` | If `true`, triggers a 30s grace countdown followed by `shutdown /h` upon completion of all active agents. Armed only if an agent was active when enabled. |
 | `defaultAutoContinue` | `boolean` | `true` | Default policy for automatically resuming rate-limited agents. |
 | `defaultAutoFix` | `boolean` | `false` | Default policy for dispatching the bug-free & pixel-perfect audit upon task completion. |
 | `defaultAutoImprove` | `boolean` | `false` | Default policy for dispatching deep optimization & polish loops upon task completion. |

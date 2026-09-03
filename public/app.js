@@ -53,6 +53,7 @@ const settingsModal = document.getElementById('settingsModal');
 const inputLookback = document.getElementById('inputLookback');
 const inputRecheck = document.getElementById('inputRecheck');
 const modalToggleHibernate = document.getElementById('modalToggleHibernate');
+const modalToggleHibernateOnCompletion = document.getElementById('modalToggleHibernateOnCompletion');
 const modalToggleAutoContinue = document.getElementById('modalToggleAutoContinue');
 const modalToggleAutoFix = document.getElementById('modalToggleAutoFix');
 const modalToggleAutoImprove = document.getElementById('modalToggleAutoImprove');
@@ -136,12 +137,19 @@ function handleHibernationBanner(hibernation) {
   }
 
   hibernationBanner.style.display = 'flex';
-  hibernationDesc.textContent = hibernation.reason || 'Weekly limit detected. Hibernating to conserve power.';
+  const titleEl = document.querySelector('.hibernation-alert-title');
+  const isAllCompleted = hibernation.triggerType === 'all_completed';
+  if (titleEl) {
+    const titlePrefix = isAllCompleted ? 'ALL AGENTS COMPLETED — PC HIBERNATING IN ' : 'WEEKLY LIMIT REACHED — PC HIBERNATING IN ';
+    titleEl.innerHTML = `${titlePrefix}<span id="hibernateCountdownSec">30</span>s`;
+  }
+  hibernationDesc.textContent = hibernation.reason || (isAllCompleted ? 'All active agents completed their tasks. Hibernating to conserve power.' : 'Weekly limit detected. Hibernating to conserve power.');
 
   if (hibernationInterval) clearInterval(hibernationInterval);
   hibernationInterval = setInterval(() => {
+    const cdSpan = document.getElementById('hibernateCountdownSec');
     const remaining = Math.max(0, Math.ceil((hibernation.targetTimestamp - Date.now()) / 1000));
-    hibernateCountdownSec.textContent = remaining;
+    if (cdSpan) cdSpan.textContent = remaining;
     if (remaining <= 0) {
       clearInterval(hibernationInterval);
     }
@@ -166,6 +174,7 @@ function syncSettingsToModal(cfg) {
   if (cfg.lookbackHours) inputLookback.value = cfg.lookbackHours;
   if (cfg.recheckIntervalSeconds) inputRecheck.value = cfg.recheckIntervalSeconds;
   if (typeof cfg.hibernateOnWeeklyLimit === 'boolean') modalToggleHibernate.checked = cfg.hibernateOnWeeklyLimit;
+  if (typeof cfg.hibernateOnAllCompleted === 'boolean') modalToggleHibernateOnCompletion.checked = cfg.hibernateOnAllCompleted;
   if (typeof cfg.defaultAutoContinue === 'boolean') {
     modalToggleAutoContinue.checked = cfg.defaultAutoContinue;
   } else if (typeof cfg.autoResumeEnabled === 'boolean') {
@@ -215,6 +224,7 @@ function getDemoState() {
       lookbackHours: 6,
       recheckIntervalSeconds: 120,
       hibernateOnWeeklyLimit: true,
+      hibernateOnAllCompleted: false,
       autoResumeEnabled: true,
       defaultAutoContinue: true,
       defaultAutoFix: false,
@@ -723,6 +733,7 @@ async function saveSettingsFromModal() {
   const lookbackHours = parseInt(inputLookback.value, 10) || 6;
   const recheckIntervalSeconds = parseInt(inputRecheck.value, 10) || 120;
   const hibernateOnWeeklyLimit = modalToggleHibernate.checked;
+  const hibernateOnAllCompleted = modalToggleHibernateOnCompletion.checked;
   const defaultAutoContinue = modalToggleAutoContinue.checked;
   const defaultAutoFix = modalToggleAutoFix.checked;
   const defaultAutoImprove = modalToggleAutoImprove.checked;
@@ -743,6 +754,7 @@ async function saveSettingsFromModal() {
         lookbackHours,
         recheckIntervalSeconds,
         hibernateOnWeeklyLimit,
+        hibernateOnAllCompleted,
         autoResumeEnabled: defaultAutoContinue,
         defaultAutoContinue,
         defaultAutoFix,
@@ -753,7 +765,15 @@ async function saveSettingsFromModal() {
     });
     const data = await res.json();
     if (data.ok) {
-      showToast('Configuration saved successfully!', '⚙️');
+      if (hibernateOnAllCompleted) {
+        if (data.armedOnCompletion) {
+          showToast('Configuration saved: Hibernate on Completion is ARMED! 💤', '⚙️');
+        } else {
+          showToast('Configuration saved (Note: No active agents to arm hibernation) ℹ️', '⚙️');
+        }
+      } else {
+        showToast('Configuration saved successfully!', '⚙️');
+      }
       settingsModal.style.display = 'none';
       fetchStatus();
     }
@@ -881,7 +901,8 @@ function initSSE() {
       } else if (evt.type === 'AUTO_IMPROVE_TRIGGERED') {
         showToast(`🚀 ${evt.sessionName}: Dispatched Auto-Improve Loop!`, '⚡');
       } else if (evt.type === 'HIBERNATE_TRIGGERED') {
-        showToast(`💤 Weekly limit: Hibernating PC in 30s...`, '⚠️');
+        const isAllComp = evt.metadata?.triggerType === 'all_completed';
+        showToast(isAllComp ? '💤 All agents completed: Hibernating PC in 30s...' : '💤 Weekly limit: Hibernating PC in 30s...', '⚠️');
       }
       fetchEvents();
     } catch (err) {}

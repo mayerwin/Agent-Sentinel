@@ -80,7 +80,8 @@ The verification engine monitors transcript growth and active tool streams befor
 ---
 
 ## 4. Power Management & Hibernation
-- If the user has enabled **Hibernate on Weekly Limit** in the Settings menu (or `config.json`), and an agent is diagnosed with a `weekly_limit`, Sentinel initiates a 30-second warning countdown and hibernates the PC via `shutdown /h` to conserve power.
+- **Hibernate on Weekly Limit**: If enabled in Settings (or `config.json`), diagnosing an agent with `weekly_limit` initiates a 30-second warning countdown and hibernates the PC via `shutdown /h`.
+- **Hibernate on Completion of All Agents**: If enabled in Settings (or `config.json`), Sentinel automatically hibernates the PC via `shutdown /h` (with a 30s grace period) once all active agents finish their tasks. To prevent unwanted immediate hibernation, this trigger is safely armed **only if at least one agent was active when the option was enabled**. Once triggered or cancelled, the option automatically resets to `false` in `config.json` to prevent re-hibernation upon waking.
 
 ---
 
