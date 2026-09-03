@@ -182,14 +182,22 @@ function addEvent(type, sessionId, sessionName, message, metadata = {}) {
   return evt;
 }
 
-function readLastRawTurns(filePath, maxLines = 15) {
+const transcriptCache = new Map();
+
+function readLastRawTurns(filePath, maxLines = 15, stats = null) {
   try {
-    const stats = fs.statSync(filePath);
-    if (stats.size === 0) return { turns: [], latestMessageTimestamp: null };
-    const bufferSize = Math.min(stats.size, 128 * 1024);
+    const st = stats || fs.statSync(filePath);
+    if (st.size === 0) return { turns: [], latestMessageTimestamp: null };
+
+    const cached = transcriptCache.get(filePath);
+    if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+      return cached.data;
+    }
+
+    const bufferSize = Math.min(st.size, 128 * 1024);
     const fd = fs.openSync(filePath, 'r');
     const buf = Buffer.alloc(bufferSize);
-    fs.readSync(fd, buf, 0, bufferSize, stats.size - bufferSize);
+    fs.readSync(fd, buf, 0, bufferSize, st.size - bufferSize);
     fs.closeSync(fd);
     const text = buf.toString('utf8');
     const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
@@ -211,7 +219,9 @@ function readLastRawTurns(filePath, maxLines = 15) {
       } catch (e) {}
     }
 
-    return { turns, latestMessageTimestamp };
+    const data = { turns, latestMessageTimestamp };
+    transcriptCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, data });
+    return data;
   } catch (e) {
     return { turns: [], latestMessageTimestamp: null };
   }
@@ -336,22 +346,13 @@ function parseRateLimitNotice(text, now = new Date()) {
   };
 }
 
-function getAlivePids() {
+function isPidAlive(pid) {
+  if (!pid || !Number.isFinite(pid)) return false;
   try {
-    const stdout = execSync('tasklist /FO CSV /NH', { timeout: 3000, windowsHide: true }).toString();
-    const pids = new Set();
-    for (const line of stdout.split(/\r?\n/)) {
-      if (!line.trim()) continue;
-      const parts = line.split('","');
-      if (parts.length >= 2) {
-        const pidStr = parts[1].replace(/"/g, '').trim();
-        const pid = parseInt(pidStr, 10);
-        if (Number.isFinite(pid)) pids.add(pid);
-      }
-    }
-    return pids;
+    process.kill(pid, 0);
+    return true;
   } catch (e) {
-    return new Set();
+    return e.code === 'EPERM';
   }
 }
 
@@ -403,7 +404,6 @@ function scanAgents() {
     const now = Date.now();
     const lookbackMs = (config.lookbackHours || 6) * 3600 * 1000;
     const cutoffTime = now - lookbackMs;
-    const alivePids = getAlivePids();
 
     const activeSessionMeta = new Map();
     if (fs.existsSync(SESSIONS_DIR)) {
@@ -430,9 +430,13 @@ function scanAgents() {
             const fullPath = path.join(fullPDir, f);
             const sessionId = f.replace('.jsonl', '');
             const isMetaActive = activeSessionMeta.has(sessionId);
-            
-            const { turns, latestMessageTimestamp } = readLastRawTurns(fullPath, 10);
+
             const st = fs.statSync(fullPath);
+            if (st.mtimeMs < cutoffTime && !isMetaActive) {
+              continue;
+            }
+
+            const { turns, latestMessageTimestamp } = readLastRawTurns(fullPath, 10, st);
             const effectiveTime = latestMessageTimestamp || (isMetaActive ? st.mtimeMs : 0);
 
             if (effectiveTime >= cutoffTime || isMetaActive) {
@@ -466,7 +470,7 @@ function scanAgents() {
     for (const s of foundSessions) {
       const meta = activeSessionMeta.get(s.sessionId) || {};
       const pid = meta.pid || null;
-      const isProcessAlive = pid ? alivePids.has(pid) : false;
+      const isProcessAlive = pid ? isPidAlive(pid) : false;
       const sessionName = meta.name || s.sessionId.slice(0, 8);
       const cwd = meta.cwd || (s.projectFolder ? s.projectFolder.replace(/^c--/, 'C:\\').replace(/-/g, '\\') : '');
       const isEnabled = !(config.disabledSessionIds || []).includes(s.sessionId);
@@ -1060,9 +1064,6 @@ const server = http.createServer((req, res) => {
             const agent = state.agents.get(ev.sessionId);
             if (!agent) continue;
 
-            agent.lastEvaluatedSignature = agent.activitySignature || `${agent.fileSize}_${agent.messageTimeMs}_${agent.isProcessAlive}_${agent.status}`;
-            agent.needsEvaluation = false;
-
             agent.llmEvaluation = {
               status: ev.status || agent.status,
               reasoning: ev.llmReasoning || '',
@@ -1107,6 +1108,10 @@ const server = http.createServer((req, res) => {
             } else {
               agent.status = 'DISABLED';
             }
+
+            agent.activitySignature = `${agent.fileSize}_${agent.messageTimeMs}_${agent.isProcessAlive}_${agent.status}`;
+            agent.lastEvaluatedSignature = agent.activitySignature;
+            agent.needsEvaluation = false;
           }
 
           scanAgents();
@@ -1281,7 +1286,7 @@ function startServer(targetPort, maxAttempts = 10) {
       let isSentinel = false;
       try {
         const checkRes = await new Promise((resolve) => {
-          const req = http.get(`http://localhost:${targetPort}/api/status`, { timeout: 1500 }, (res) => {
+          const req = http.get(`http://127.0.0.1:${targetPort}/api/status`, { timeout: 1500 }, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
@@ -1318,7 +1323,7 @@ function startServer(targetPort, maxAttempts = 10) {
     }
   });
 
-  server.listen(targetPort, '0.0.0.0', () => {
+  server.listen(targetPort, () => {
     console.log(`\n======================================================`);
     console.log(`  AGENT SENTINEL — LLM COGNITIVE MONITOR`);
     console.log(`  Dashboard: http://localhost:${targetPort}`);
