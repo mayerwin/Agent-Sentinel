@@ -188,6 +188,7 @@ const state = {
     timer: null
   },
   hibernateOnAllCompletedArmed: false,
+  allAgentsCompletedSince: null,
   stats: {
     totalScanned: 0,
     activeRunning: 0,
@@ -273,8 +274,29 @@ function computeBaselineAgentStatus(lastMeaningfulTurn, messageTimeMs, isProcess
 
   if (lastMeaningfulTurn.type === 'assistant') {
     const stopReason = lastMeaningfulTurn.message?.stop_reason;
-    if (stopReason === 'end_turn' || stopReason === 'stop') return 'IDLE';
-    if (stopReason === 'tool_use') return ageMinutes <= 5 ? 'ACTIVE' : 'IDLE';
+    const content = lastMeaningfulTurn.message?.content;
+    const hasToolUse = Array.isArray(content) && content.some(c => c.type === 'tool_use');
+    const hasText = typeof content === 'string' ? content.trim().length > 0 : (Array.isArray(content) && content.some(c => c.type === 'text' && c.text?.trim().length > 0));
+
+    // If assistant returned no text and no tool use (e.g. intermediate thinking-only block) while process is alive:
+    if (!hasToolUse && !hasText && isProcessAlive && ageMinutes <= 3) {
+      return 'ACTIVE';
+    }
+
+    if (stopReason === 'tool_use' || hasToolUse) {
+      return ageMinutes <= 5 ? 'ACTIVE' : 'IDLE';
+    }
+
+    if (stopReason === 'end_turn' || stopReason === 'stop') {
+      const ageSeconds = Math.max(0, Math.round((now - (messageTimeMs || 0)) / 1000));
+      // If process is alive and message was written less than 45 seconds ago,
+      // it is in the post-turn / next-prompt transition grace period.
+      if (ageSeconds < 45 && isProcessAlive) {
+        return 'ACTIVE';
+      }
+      return 'IDLE';
+    }
+
     return 'IDLE';
   }
 
@@ -451,11 +473,19 @@ function triggerHibernationSequence(reason, triggerType = 'weekly_limit') {
   state.hibernation.timer = setTimeout(() => {
     if (state.hibernation.pending) {
       addEvent('HIBERNATE_EXECUTED', null, 'SYSTEM', `Executing system hibernation: shutdown /h`);
+      state.hibernation.pending = false;
+      state.hibernation.triggerType = null;
+      state.hibernation.reason = null;
+      state.hibernation.targetTimestamp = null;
+      state.hibernation.timer = null;
       state.hibernateOnAllCompletedArmed = false;
       if (config.hibernateOnAllCompleted) {
         config.hibernateOnAllCompleted = false;
         saveConfig();
       }
+      broadcastSSE('hibernation_status', {
+        pending: false
+      });
       try {
         exec('shutdown /h', (err) => {
           if (err) console.error('Hibernation error:', err.message);
@@ -476,6 +506,7 @@ function cancelHibernation() {
   state.hibernation.targetTimestamp = null;
   state.hibernation.timer = null;
   state.hibernateOnAllCompletedArmed = false;
+  state.allAgentsCompletedSince = null;
   if (config.hibernateOnAllCompleted) {
     config.hibernateOnAllCompleted = false;
     saveConfig();
@@ -725,7 +756,11 @@ function scanAgents() {
         activeCount++;
       } else {
         if (agent.llmEvaluation && !agent.needsEvaluation) {
-          agent.status = agent.llmEvaluation.status || baselineStatus;
+          if (agent.llmEvaluation.status === 'ACTIVE' && baselineStatus === 'IDLE') {
+            agent.status = 'IDLE';
+          } else {
+            agent.status = agent.llmEvaluation.status || baselineStatus;
+          }
         } else {
           agent.status = baselineStatus;
         }
@@ -754,6 +789,14 @@ function scanAgents() {
       agent.needsEvaluation = (agent.lastEvaluatedSignature !== agent.activitySignature);
     }
 
+    if (state.hibernation.pending && state.hibernation.targetTimestamp && now >= state.hibernation.targetTimestamp) {
+      state.hibernation.pending = false;
+      state.hibernation.triggerType = null;
+      state.hibernation.reason = null;
+      state.hibernation.targetTimestamp = null;
+      state.hibernation.timer = null;
+    }
+
     state.stats.totalScanned = state.agents.size;
     state.stats.activeRunning = activeCount;
     state.stats.limited = limitedCount;
@@ -762,9 +805,18 @@ function scanAgents() {
     // Check for Hibernate on All Agents Completed (only if armed while agents were active)
     if (config.hibernateOnAllCompleted && state.hibernateOnAllCompletedArmed) {
       if (activeCount === 0 && !state.hibernation.pending && !config.globalPaused) {
-        state.hibernateOnAllCompletedArmed = false;
-        triggerHibernationSequence('All active Claude Code agents have completed their tasks', 'all_completed');
+        if (!state.allAgentsCompletedSince) {
+          state.allAgentsCompletedSince = now;
+        } else if (now - state.allAgentsCompletedSince >= 90000) {
+          state.hibernateOnAllCompletedArmed = false;
+          state.allAgentsCompletedSince = null;
+          triggerHibernationSequence('All active Claude Code agents have completed their tasks', 'all_completed');
+        }
+      } else {
+        state.allAgentsCompletedSince = null;
       }
+    } else {
+      state.allAgentsCompletedSince = null;
     }
 
     broadcastSSE('status', getSanitizedStatus());
@@ -980,6 +1032,14 @@ function getSanitizedStatus() {
 
   agentList.sort((a, b) => (b.messageTimeMs || 0) - (a.messageTimeMs || 0));
 
+  if (state.hibernation.pending && state.hibernation.targetTimestamp && Date.now() >= state.hibernation.targetTimestamp) {
+    state.hibernation.pending = false;
+    state.hibernation.triggerType = null;
+    state.hibernation.reason = null;
+    state.hibernation.targetTimestamp = null;
+    state.hibernation.timer = null;
+  }
+
   return {
     systemTime: new Date().toISOString(),
     serverStartedAt: state.startedAt,
@@ -990,7 +1050,10 @@ function getSanitizedStatus() {
       triggerType: state.hibernation.triggerType || null,
       reason: state.hibernation.reason,
       targetTimestamp: state.hibernation.targetTimestamp,
-      armedOnCompletion: state.hibernateOnAllCompletedArmed
+      armedOnCompletion: state.hibernateOnAllCompletedArmed,
+      allCompletedSettlingSeconds: state.allAgentsCompletedSince && state.hibernateOnAllCompletedArmed
+        ? Math.max(0, Math.ceil((90000 - (Date.now() - state.allAgentsCompletedSince)) / 1000))
+        : null
     },
     stats: state.stats,
     agents: agentList,
@@ -1101,6 +1164,7 @@ const server = http.createServer((req, res) => {
               }
             } else if (!willHibernateOnAllBeEnabled && wasHibernateOnAllEnabled) {
               state.hibernateOnAllCompletedArmed = false;
+              state.allAgentsCompletedSince = null;
               if (state.hibernation.pending && state.hibernation.triggerType === 'all_completed') {
                 cancelHibernation();
               }
@@ -1430,7 +1494,7 @@ function startServer(targetPort, maxAttempts = 10) {
       let isSentinel = false;
       try {
         const checkRes = await new Promise((resolve) => {
-          const req = http.get(`http://127.0.0.1:${targetPort}/api/status`, { timeout: 1500 }, (res) => {
+          const req = http.get(`http://localhost:${targetPort}/api/status`, { timeout: 1500 }, (res) => {
             let data = '';
             res.on('data', chunk => data += chunk);
             res.on('end', () => {
@@ -1467,7 +1531,7 @@ function startServer(targetPort, maxAttempts = 10) {
     }
   });
 
-  server.listen(targetPort, () => {
+  server.listen(targetPort, 'localhost', () => {
     console.log(`\n======================================================`);
     console.log(`  AGENT SENTINEL — LLM COGNITIVE MONITOR`);
     console.log(`  Dashboard: http://localhost:${targetPort}`);

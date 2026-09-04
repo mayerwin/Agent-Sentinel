@@ -136,22 +136,30 @@ function handleHibernationBanner(hibernation) {
     return;
   }
 
+  const remaining = Math.max(0, Math.ceil((hibernation.targetTimestamp - Date.now()) / 1000));
+  if (remaining <= 0) {
+    hibernationBanner.style.display = 'none';
+    if (hibernationInterval) clearInterval(hibernationInterval);
+    return;
+  }
+
   hibernationBanner.style.display = 'flex';
   const titleEl = document.querySelector('.hibernation-alert-title');
   const isAllCompleted = hibernation.triggerType === 'all_completed';
   if (titleEl) {
     const titlePrefix = isAllCompleted ? 'ALL AGENTS COMPLETED — PC HIBERNATING IN ' : 'WEEKLY LIMIT REACHED — PC HIBERNATING IN ';
-    titleEl.innerHTML = `${titlePrefix}<span id="hibernateCountdownSec">30</span>s`;
+    titleEl.innerHTML = `${titlePrefix}<span id="hibernateCountdownSec">${remaining}</span>s`;
   }
   hibernationDesc.textContent = hibernation.reason || (isAllCompleted ? 'All active agents completed their tasks. Hibernating to conserve power.' : 'Weekly limit detected. Hibernating to conserve power.');
 
   if (hibernationInterval) clearInterval(hibernationInterval);
   hibernationInterval = setInterval(() => {
     const cdSpan = document.getElementById('hibernateCountdownSec');
-    const remaining = Math.max(0, Math.ceil((hibernation.targetTimestamp - Date.now()) / 1000));
-    if (cdSpan) cdSpan.textContent = remaining;
-    if (remaining <= 0) {
+    const rem = Math.max(0, Math.ceil((hibernation.targetTimestamp - Date.now()) / 1000));
+    if (cdSpan) cdSpan.textContent = rem;
+    if (rem <= 0) {
       clearInterval(hibernationInterval);
+      hibernationBanner.style.display = 'none';
     }
   }, 250);
 }
