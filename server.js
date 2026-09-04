@@ -217,44 +217,72 @@ const transcriptCache = new Map();
 function readLastRawTurns(filePath, maxLines = 15, stats = null) {
   try {
     const st = stats || fs.statSync(filePath);
-    if (st.size === 0) return { turns: [], latestMessageTimestamp: null };
+    if (st.size === 0) return { turns: [], latestMessageTimestamp: null, lastMeaningfulTurn: null };
 
     const cached = transcriptCache.get(filePath);
     if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
       return cached.data;
     }
 
-    const bufferSize = Math.min(st.size, 128 * 1024);
+    const bufferSize = Math.min(st.size, 256 * 1024);
     const fd = fs.openSync(filePath, 'r');
     const buf = Buffer.alloc(bufferSize);
     fs.readSync(fd, buf, 0, bufferSize, st.size - bufferSize);
     fs.closeSync(fd);
     const text = buf.toString('utf8');
     const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
-    const tailLines = lines.slice(-maxLines);
 
     const turns = [];
     let latestMessageTimestamp = null;
+    let lastMeaningfulTurn = null;
 
-    for (const l of tailLines) {
+    for (let i = lines.length - 1; i >= 0; i--) {
       try {
-        const obj = JSON.parse(l);
-        turns.push(obj);
+        const obj = JSON.parse(lines[i]);
         if (obj.timestamp) {
           const t = new Date(obj.timestamp).getTime();
           if (t && (!latestMessageTimestamp || t > latestMessageTimestamp)) {
             latestMessageTimestamp = t;
           }
         }
+        if (obj.type === 'user' || obj.type === 'assistant') {
+          if (!lastMeaningfulTurn) lastMeaningfulTurn = obj;
+          if (turns.length < maxLines) {
+            turns.unshift(obj);
+          }
+        } else if (obj.type === 'last-prompt' && turns.length < maxLines) {
+          turns.unshift(obj);
+        }
       } catch (e) {}
     }
 
-    const data = { turns, latestMessageTimestamp };
+    const data = { turns, latestMessageTimestamp, lastMeaningfulTurn };
     transcriptCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, data });
     return data;
   } catch (e) {
-    return { turns: [], latestMessageTimestamp: null };
+    return { turns: [], latestMessageTimestamp: null, lastMeaningfulTurn: null };
   }
+}
+
+function computeBaselineAgentStatus(lastMeaningfulTurn, messageTimeMs, isProcessAlive, now = Date.now()) {
+  if (!isProcessAlive) return 'IDLE';
+
+  const ageMinutes = Math.max(0, Math.round((now - (messageTimeMs || 0)) / 60000));
+  if (ageMinutes > 10) return 'IDLE';
+  if (!lastMeaningfulTurn) return 'IDLE';
+
+  if (lastMeaningfulTurn.type === 'assistant') {
+    const stopReason = lastMeaningfulTurn.message?.stop_reason;
+    if (stopReason === 'end_turn' || stopReason === 'stop') return 'IDLE';
+    if (stopReason === 'tool_use') return ageMinutes <= 5 ? 'ACTIVE' : 'IDLE';
+    return 'IDLE';
+  }
+
+  if (lastMeaningfulTurn.type === 'user') {
+    return ageMinutes <= 5 ? 'ACTIVE' : 'IDLE';
+  }
+
+  return 'IDLE';
 }
 
 const TZ_MAP = {
@@ -500,10 +528,10 @@ function scanAgents() {
               continue;
             }
 
-            const { turns, latestMessageTimestamp } = readLastRawTurns(fullPath, 10, st);
+            const { turns, latestMessageTimestamp, lastMeaningfulTurn } = readLastRawTurns(fullPath, 15, st);
             const effectiveTime = latestMessageTimestamp || (isMetaActive ? st.mtimeMs : 0);
 
-            if (effectiveTime >= cutoffTime || isMetaActive) {
+            if (effectiveTime >= cutoffTime) {
               foundSessions.push({
                 sessionId,
                 projectFolder: pDir,
@@ -513,7 +541,8 @@ function scanAgents() {
                 messageTimeMs: effectiveTime,
                 messageTimeIso: new Date(effectiveTime).toISOString(),
                 ageMinutes: Math.max(0, Math.round((now - effectiveTime) / 60000)),
-                turns
+                turns,
+                lastMeaningfulTurn
               });
             }
           }
@@ -541,6 +570,7 @@ function scanAgents() {
         continue;
       }
       const isEnabled = !(config.disabledSessionIds || []).includes(s.sessionId);
+      const baselineStatus = computeBaselineAgentStatus(s.lastMeaningfulTurn, s.messageTimeMs, isProcessAlive, now);
 
       let agent = state.agents.get(s.sessionId);
       if (!agent) {
@@ -557,7 +587,7 @@ function scanAgents() {
           messageTimeMs: s.messageTimeMs,
           lastActivityIso: s.messageTimeIso,
           ageMinutes: s.ageMinutes,
-          status: config.globalPaused ? 'PAUSED' : (!isEnabled ? 'DISABLED' : (isProcessAlive ? 'ACTIVE' : 'IDLE')),
+          status: config.globalPaused ? 'PAUSED' : (!isEnabled ? 'DISABLED' : baselineStatus),
           llmEvaluation: null,
           limitNotice: null,
           lastPrompt: '',
@@ -570,7 +600,7 @@ function scanAgents() {
           lastResumeAttemptAt: null,
         };
         state.agents.set(s.sessionId, agent);
-        addEvent('INFO', agent.sessionId, agent.name, `Discovered active agent session (PID ${pid || 'none'}, last message ${s.ageMinutes}m ago)`);
+        addEvent('INFO', agent.sessionId, agent.name, `Discovered agent session (PID ${pid || 'none'}, last message ${s.ageMinutes}m ago)`);
       } else {
         agent.name = meta.name || agent.name;
         agent.cwd = meta.cwd || agent.cwd;
@@ -642,11 +672,11 @@ function scanAgents() {
             if (features.autoContinue && !config.globalPaused && agent.enabled) {
               dispatchPromptToAgent(agent, 'AUTO_CONTINUE', PROMPT_AUTO_CONTINUE, 'Rate Limit Reset Window Reached');
             } else if (!config.globalPaused && agent.enabled) {
-              agent.status = isProcessAlive ? 'ACTIVE' : 'IDLE';
+              agent.status = baselineStatus;
             }
           } else if (!config.globalPaused && agent.enabled && agent.status === 'LIMITED') {
             agent.limitNotice = null;
-            agent.status = isProcessAlive ? 'ACTIVE' : 'IDLE';
+            agent.status = baselineStatus;
           }
         } else {
           // Limit is active in the future
@@ -681,7 +711,7 @@ function scanAgents() {
         if (features.autoContinue && !config.globalPaused && agent.enabled) {
           dispatchPromptToAgent(agent, 'AUTO_CONTINUE', PROMPT_AUTO_CONTINUE, 'Rate Limit Reset Window Reached');
         } else if (!config.globalPaused && agent.enabled) {
-          agent.status = isProcessAlive ? 'ACTIVE' : 'IDLE';
+          agent.status = baselineStatus;
         }
       }
 
@@ -691,23 +721,33 @@ function scanAgents() {
         agent.status = 'DISABLED';
       } else if (agent.status === 'LIMITED') {
         limitedCount++;
-      } else if (agent.status === 'IDLE') {
-        // Autonomous completion triggers if enabled
-        const isRecentTurn = agent.ageMinutes < (config.lookbackHours || 6) * 60;
-        if (isRecentTurn && agent.lastAutonomousPromptTurn !== agent.lastActivityIso && agent.rawRecentTurns && agent.rawRecentTurns.length > 0) {
-          const lastTurn = agent.rawRecentTurns[agent.rawRecentTurns.length - 1];
-          const isAssistantCompleted = lastTurn?.type === 'assistant' || lastTurn?.message?.role === 'assistant';
-          
-          if (isAssistantCompleted) {
-            if (features.autoFix) {
-              dispatchPromptToAgent(agent, 'AUTO_FIX', getPromptForAction('autofix'), 'Autonomous Task Completion Review');
-            } else if (features.autoImprove) {
-              dispatchPromptToAgent(agent, 'AUTO_IMPROVE', getPromptForAction('autoimprove'), 'Autonomous Deep Improvement Loop');
+      } else if (agent.status === 'RESUMING' || agent.status === 'VERIFYING') {
+        activeCount++;
+      } else {
+        if (agent.llmEvaluation && !agent.needsEvaluation) {
+          agent.status = agent.llmEvaluation.status || baselineStatus;
+        } else {
+          agent.status = baselineStatus;
+        }
+
+        if (agent.status === 'IDLE') {
+          // Autonomous completion triggers if enabled
+          const isRecentTurn = agent.ageMinutes < (config.lookbackHours || 6) * 60;
+          if (isRecentTurn && agent.lastAutonomousPromptTurn !== agent.lastActivityIso && agent.rawRecentTurns && agent.rawRecentTurns.length > 0) {
+            const lastTurn = agent.rawRecentTurns[agent.rawRecentTurns.length - 1];
+            const isAssistantCompleted = lastTurn?.type === 'assistant' || lastTurn?.message?.role === 'assistant';
+            
+            if (isAssistantCompleted) {
+              if (features.autoFix) {
+                dispatchPromptToAgent(agent, 'AUTO_FIX', getPromptForAction('autofix'), 'Autonomous Task Completion Review');
+              } else if (features.autoImprove) {
+                dispatchPromptToAgent(agent, 'AUTO_IMPROVE', getPromptForAction('autoimprove'), 'Autonomous Deep Improvement Loop');
+              }
             }
           }
+        } else if (agent.status === 'ACTIVE' || agent.status === 'AUTO_FIXING' || agent.status === 'AUTO_IMPROVING') {
+          activeCount++;
         }
-      } else if (agent.status === 'ACTIVE' || agent.status === 'RESUMING' || agent.status === 'VERIFYING' || agent.status === 'AUTO_FIXING' || agent.status === 'AUTO_IMPROVING') {
-        activeCount++;
       }
 
       agent.activitySignature = `${agent.fileSize}_${agent.messageTimeMs}_${agent.isProcessAlive}_${agent.status}`;
@@ -1206,7 +1246,7 @@ const server = http.createServer((req, res) => {
                   addEvent('INFO', agent.sessionId, agent.name, `🧠 LLM Determined Limit Cleared: ${ev.summary}`);
                 }
                 if (agent.status !== 'RESUMING' && agent.status !== 'VERIFYING') {
-                  agent.status = ev.status || (agent.isProcessAlive ? 'ACTIVE' : 'IDLE');
+                  agent.status = ev.status || agent.status || 'IDLE';
                 }
               }
             } else {
