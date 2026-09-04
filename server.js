@@ -756,7 +756,8 @@ function scanAgents() {
         activeCount++;
       } else {
         if (agent.llmEvaluation && !agent.needsEvaluation) {
-          if (agent.llmEvaluation.status === 'ACTIVE' && baselineStatus === 'IDLE') {
+          const evalAgeMs = agent.llmEvaluation.evaluatedAt ? (now - new Date(agent.llmEvaluation.evaluatedAt).getTime()) : 0;
+          if (!isProcessAlive || agent.ageMinutes > 5 || evalAgeMs > 300000) {
             agent.status = 'IDLE';
           } else {
             agent.status = agent.llmEvaluation.status || baselineStatus;
