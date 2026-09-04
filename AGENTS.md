@@ -21,6 +21,8 @@ When the user opens this repository in an AI coding assistant (Antigravity, Curs
 **DO NOT rely on simplistic regexes to classify agent states.**
 As an intelligent LLM, you are the Cognitive Supervisor. To maximize speed and minimize token consumption:
 
+> **Self-Monitoring Exclusion**: Sentinel automatically detects and excludes its own repository (`Agent-Sentinel`) from monitored agent sessions. If Claude Code (or any agent runtime) is running in this repository to execute supervisory checks or tasks, it will not be treated as a monitored agent target and will not prevent "completion of all agents" triggers or auto-hibernation from firing.
+
 1. Fetch pending/changed agent contexts from the server:
    ```bash
    GET http://localhost:3456/api/raw-agent-context?onlyChanged=true

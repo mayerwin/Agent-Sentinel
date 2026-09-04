@@ -66,6 +66,10 @@ Configure behavior globally in Settings or override per agent:
 - Inspects the **actual ISO timestamps of conversation turns** rather than filesystem `mtime`.
 - Prevents external tools (Dropbox sync, antivirus scans, Calibre library indexes) from falsely pulling stale sessions into your active monitoring view.
 
+### 9. 🛡️ Self-Monitoring Exclusion
+- Automatically identifies and excludes `Agent-Sentinel`'s own repository from session discovery.
+- If Claude Code is the agent running in the Sentinel repository to conduct cognitive supervision, it will never mistakenly treat itself as a monitored target or prevent "completion of all agents" triggers from firing.
+
 ---
 
 ## 🚀 Quick Start

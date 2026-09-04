@@ -24,6 +24,33 @@ const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 const AM_DIR = 'C:\\Users\\erwin\\Dropbox\\Projects\\GitHub\\Agent-Manager';
 const AM_QUEUE_DIR = path.join(AM_DIR, '.data', 'queue');
 const CONFIG_FILE = path.join(__dirname, 'config.json');
+const SENTINEL_DIR = path.resolve(__dirname).toLowerCase();
+
+function isSentinelPathOrFolder(cwd, projectFolder) {
+  if (cwd) {
+    try {
+      const normCwd = path.resolve(cwd).toLowerCase();
+      if (normCwd === SENTINEL_DIR ||
+          normCwd.startsWith(SENTINEL_DIR + path.sep.toLowerCase()) ||
+          normCwd.startsWith(SENTINEL_DIR + '/') ||
+          normCwd.endsWith('agent-sentinel')) {
+        return true;
+      }
+    } catch (e) {}
+  }
+  if (projectFolder) {
+    const pLower = projectFolder.toLowerCase();
+    const encodedSentinel = SENTINEL_DIR.replace(/^([a-z]):\\?/, '$1--').replace(/\\|\//g, '-');
+    if (pLower === encodedSentinel ||
+        pLower.startsWith(encodedSentinel + '-') ||
+        pLower.endsWith('-agent-sentinel') ||
+        pLower === 'agent-sentinel' ||
+        pLower.includes('-agent-sentinel-')) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function findClaudeBinary() {
   const roots = [
@@ -443,6 +470,9 @@ function scanAgents() {
         try {
           const meta = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8'));
           if (meta && meta.sessionId) {
+            if (isSentinelPathOrFolder(meta.cwd, null)) {
+              continue;
+            }
             activeSessionMeta.set(meta.sessionId, meta);
           }
         } catch (e) {}
@@ -453,6 +483,9 @@ function scanAgents() {
     if (fs.existsSync(PROJECTS_DIR)) {
       const projectDirs = fs.readdirSync(PROJECTS_DIR);
       for (const pDir of projectDirs) {
+        if (isSentinelPathOrFolder(null, pDir)) {
+          continue;
+        }
         const fullPDir = path.join(PROJECTS_DIR, pDir);
         try {
           if (!fs.statSync(fullPDir).isDirectory()) continue;
@@ -492,8 +525,8 @@ function scanAgents() {
     let limitedCount = 0;
     const currentSessionIds = new Set(foundSessions.map(s => s.sessionId));
 
-    for (const [sid] of state.agents) {
-      if (!currentSessionIds.has(sid)) {
+    for (const [sid, agent] of state.agents) {
+      if (!currentSessionIds.has(sid) || isSentinelPathOrFolder(agent?.cwd, agent?.projectFolder)) {
         state.agents.delete(sid);
       }
     }
@@ -504,6 +537,9 @@ function scanAgents() {
       const isProcessAlive = pid ? isPidAlive(pid) : false;
       const sessionName = meta.name || s.sessionId.slice(0, 8);
       const cwd = meta.cwd || (s.projectFolder ? s.projectFolder.replace(/^c--/, 'C:\\').replace(/-/g, '\\') : '');
+      if (isSentinelPathOrFolder(cwd, s.projectFolder)) {
+        continue;
+      }
       const isEnabled = !(config.disabledSessionIds || []).includes(s.sessionId);
 
       let agent = state.agents.get(s.sessionId);
