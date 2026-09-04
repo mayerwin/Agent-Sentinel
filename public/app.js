@@ -631,6 +631,24 @@ function renderAgentCard(agent) {
         </div>
       ` : ''}
 
+      ${agent.activeSubagents && agent.activeSubagents.length > 0 ? `
+        <div class="agent-subagents-panel">
+          <div class="subagents-header">
+            <span class="subagents-icon">⚙️</span>
+            <span class="subagents-title">${agent.activeSubagents.length} Active Subagent${agent.activeSubagents.length > 1 ? 's' : ''} Working in Background</span>
+          </div>
+          <div class="subagents-list">
+            ${agent.activeSubagents.map(sub => `
+              <div class="subagent-item">
+                <span class="subagent-type">${escapeHtml(sub.agentType || 'task')}</span>
+                <span class="subagent-desc" title="${escapeHtml(sub.description)}">${escapeHtml(truncate(sub.description, 70))}</span>
+                <span class="subagent-badge">● Active (${sub.ageMinutes}m ago)</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+
       <div class="agent-footer">
         <div class="agent-footer-info">
           ${agent.verification ? `

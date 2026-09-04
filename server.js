@@ -284,6 +284,10 @@ function computeBaselineAgentStatus(lastMeaningfulTurn, messageTimeMs, isProcess
     }
 
     if (stopReason === 'tool_use' || hasToolUse) {
+      // If process is alive, agent is actively awaiting external tool execution, background task, or subagent:
+      if (isProcessAlive && ageMinutes <= 60) {
+        return 'ACTIVE';
+      }
       return ageMinutes <= 5 ? 'ACTIVE' : 'IDLE';
     }
 
@@ -305,6 +309,69 @@ function computeBaselineAgentStatus(lastMeaningfulTurn, messageTimeMs, isProcess
   }
 
   return 'IDLE';
+}
+
+function scanSubagentsForSession(projectFolder, sessionId, isProcessAlive, now = Date.now()) {
+  const subagentsDir = path.join(PROJECTS_DIR, projectFolder, sessionId, 'subagents');
+  if (!fs.existsSync(subagentsDir)) return { activeSubagents: [], latestSubagentTime: null };
+
+  const activeSubagents = [];
+  let latestSubagentTime = null;
+
+  try {
+    const files = fs.readdirSync(subagentsDir);
+    const jsonlFiles = files.filter(f => f.endsWith('.jsonl'));
+
+    for (const jf of jsonlFiles) {
+      const fullPath = path.join(subagentsDir, jf);
+      const st = fs.statSync(fullPath);
+      if (!latestSubagentTime || st.mtimeMs > latestSubagentTime) {
+        latestSubagentTime = st.mtimeMs;
+      }
+
+      const ageMinutes = Math.max(0, Math.round((now - st.mtimeMs) / 60000));
+      // Only inspect if modified recently (e.g. within last 30 minutes)
+      if (ageMinutes <= 30) {
+        const subagentId = jf.replace(/^agent-/, '').replace(/\.jsonl$/, '');
+        const metaPath = path.join(subagentsDir, `agent-${subagentId}.meta.json`);
+        let meta = {};
+        if (fs.existsSync(metaPath)) {
+          try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch (e) {}
+        }
+
+        const { lastMeaningfulTurn } = readLastRawTurns(fullPath, 5, st);
+        let subagentStatus = 'IDLE';
+        if (isProcessAlive && ageMinutes <= 15) {
+          if (lastMeaningfulTurn) {
+            if (lastMeaningfulTurn.type === 'assistant') {
+              const stopReason = lastMeaningfulTurn.message?.stop_reason;
+              if (stopReason === 'tool_use' || ageMinutes <= 2) {
+                subagentStatus = 'ACTIVE';
+              }
+            } else if (lastMeaningfulTurn.type === 'user') {
+              if (ageMinutes <= 5) subagentStatus = 'ACTIVE';
+            }
+          } else if (ageMinutes <= 3) {
+            subagentStatus = 'ACTIVE';
+          }
+        }
+
+        if (subagentStatus === 'ACTIVE') {
+          activeSubagents.push({
+            id: subagentId,
+            agentType: meta.agentType || 'subagent',
+            description: meta.description || `Subagent ${subagentId.slice(0, 8)}`,
+            toolUseId: meta.toolUseId || null,
+            status: subagentStatus,
+            ageMinutes,
+            lastActivityIso: new Date(st.mtimeMs).toISOString()
+          });
+        }
+      }
+    }
+  } catch (e) {}
+
+  return { activeSubagents, latestSubagentTime };
 }
 
 const TZ_MAP = {
@@ -629,6 +696,7 @@ function scanAgents() {
           verification: null,
           resumedCount: 0,
           lastResumeAttemptAt: null,
+          activeSubagents: [],
         };
         state.agents.set(s.sessionId, agent);
         addEvent('INFO', agent.sessionId, agent.name, `Discovered agent session (PID ${pid || 'none'}, last message ${s.ageMinutes}m ago)`);
@@ -764,6 +832,16 @@ function scanAgents() {
           }
         } else {
           agent.status = baselineStatus;
+        }
+
+        // Scan active subagents in <projectFolder>/<sessionId>/subagents
+        const { activeSubagents } = scanSubagentsForSession(s.projectFolder, s.sessionId, isProcessAlive, now);
+        agent.activeSubagents = activeSubagents;
+
+        if (activeSubagents && activeSubagents.length > 0) {
+          if (agent.status !== 'LIMITED' && agent.status !== 'PAUSED' && agent.status !== 'DISABLED') {
+            agent.status = 'ACTIVE';
+          }
         }
 
         if (agent.status === 'IDLE') {
@@ -1029,6 +1107,7 @@ function getSanitizedStatus() {
     resumedCount: a.resumedCount,
     features: getAgentEffectiveFeatures(a.sessionId),
     overrides: config.agentOverrides?.[a.sessionId] || null,
+    activeSubagents: a.activeSubagents || [],
   }));
 
   agentList.sort((a, b) => (b.messageTimeMs || 0) - (a.messageTimeMs || 0));

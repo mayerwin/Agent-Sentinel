@@ -1168,3 +1168,74 @@ input:checked + .slider:before {
   color: white;
   border-color: var(--color-primary);
 }
+
+/* Subagents Panel */
+.agent-subagents-panel {
+  background: rgba(16, 185, 129, 0.05);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+
+.subagents-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #34d399;
+  margin-bottom: 6px;
+}
+
+.subagents-icon {
+  font-size: 13px;
+  animation: spin 6s linear infinite;
+  display: inline-block;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.subagents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.subagent-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.subagent-type {
+  background: rgba(52, 211, 153, 0.15);
+  color: #6ee7b7;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.subagent-desc {
+  color: var(--text-primary);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-badge {
+  color: #10b981;
+  font-weight: 600;
+  font-size: 10.5px;
+}
