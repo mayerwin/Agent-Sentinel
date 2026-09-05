@@ -918,17 +918,6 @@ function scanAgents() {
       } else if (agent.status === 'RESUMING' || agent.status === 'VERIFYING') {
         activeCount++;
       } else {
-        if (agent.llmEvaluation && !agent.needsEvaluation) {
-          const evalAgeMs = agent.llmEvaluation.evaluatedAt ? (now - new Date(agent.llmEvaluation.evaluatedAt).getTime()) : 0;
-          if (!isProcessAlive || agent.ageMinutes > 5 || evalAgeMs > 300000) {
-            agent.status = 'IDLE';
-          } else {
-            agent.status = agent.llmEvaluation.status || baselineStatus;
-          }
-        } else {
-          agent.status = baselineStatus;
-        }
-
         // Scan active subagents in <projectFolder>/<sessionId>/subagents
         const { activeSubagents } = scanSubagentsForSession(s.projectFolder, s.sessionId, isProcessAlive, now);
         agent.activeSubagents = activeSubagents;
@@ -937,7 +926,20 @@ function scanAgents() {
         const activeTasks = detectActiveBackgroundTasks(s.projectFolder, s.sessionId, isProcessAlive, s.turns);
         agent.activeTasks = activeTasks;
 
-        if ((activeSubagents && activeSubagents.length > 0) || (activeTasks && activeTasks.length > 0)) {
+        const hasActiveWork = (activeSubagents && activeSubagents.length > 0) || (activeTasks && activeTasks.length > 0);
+
+        if (agent.llmEvaluation && !agent.needsEvaluation) {
+          const evalAgeMs = agent.llmEvaluation.evaluatedAt ? (now - new Date(agent.llmEvaluation.evaluatedAt).getTime()) : 0;
+          if (!isProcessAlive || (!hasActiveWork && (agent.ageMinutes > 5 || evalAgeMs > 300000))) {
+            agent.status = 'IDLE';
+          } else {
+            agent.status = agent.llmEvaluation.status || baselineStatus;
+          }
+        } else {
+          agent.status = baselineStatus;
+        }
+
+        if (hasActiveWork) {
           if (agent.status !== 'LIMITED' && agent.status !== 'PAUSED' && agent.status !== 'DISABLED') {
             agent.status = 'ACTIVE';
           }
