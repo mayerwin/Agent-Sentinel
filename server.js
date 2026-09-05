@@ -374,6 +374,90 @@ function scanSubagentsForSession(projectFolder, sessionId, isProcessAlive, now =
   return { activeSubagents, latestSubagentTime };
 }
 
+function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, turns = []) {
+  if (!isProcessAlive) return [];
+
+  const tasksDir = path.join(HOME, 'AppData', 'Local', 'Temp', 'claude', projectFolder, sessionId, 'tasks');
+  const activeTasks = [];
+
+  const pendingTaskCandidates = new Map();
+  const finishedTaskIds = new Set();
+
+  for (let i = 0; i < turns.length; i++) {
+    const turn = turns[i];
+    const content = turn.message?.content;
+
+    // Check for task notification (completion)
+    const textContent = typeof content === 'string' ? content : JSON.stringify(content || '');
+    const notifMatches = textContent.matchAll(/<task-id>([^<]+)<\/task-id>/g);
+    for (const nm of notifMatches) {
+      finishedTaskIds.add(nm[1]);
+    }
+
+    // Check for tool_use with run_in_background
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block.type === 'tool_use' && block.input?.run_in_background) {
+          const desc = block.input.description || block.name;
+          const cmd = block.input.command;
+          if (i + 1 < turns.length) {
+            const nextTurn = turns[i + 1];
+            const nextContent = typeof nextTurn.message?.content === 'string' 
+              ? nextTurn.message.content 
+              : JSON.stringify(nextTurn.message?.content || '');
+            const idMatch = nextContent.match(/Command running in background with ID:\s*([a-zA-Z0-9_-]+)/);
+            if (idMatch) {
+              pendingTaskCandidates.set(idMatch[1], {
+                taskId: idMatch[1],
+                description: desc,
+                command: cmd ? cmd.slice(0, 150) : null
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (const [taskId, info] of pendingTaskCandidates) {
+    if (finishedTaskIds.has(taskId)) continue;
+
+    const outputFile = path.join(tasksDir, `${taskId}.output`);
+    let isExited = false;
+    let size = 0;
+    let mtimeMs = Date.now();
+
+    if (fs.existsSync(outputFile)) {
+      const st = fs.statSync(outputFile);
+      size = st.size;
+      mtimeMs = st.mtimeMs;
+      if (st.size > 0) {
+        const readLen = Math.min(st.size, 512);
+        const buf = Buffer.alloc(readLen);
+        const fd = fs.openSync(outputFile, 'r');
+        fs.readSync(fd, buf, 0, readLen, st.size - readLen);
+        fs.closeSync(fd);
+        if (/\[exited with code \d+\]/.test(buf.toString('utf8'))) {
+          isExited = true;
+        }
+      }
+    }
+
+    if (!isExited) {
+      activeTasks.push({
+        taskId,
+        description: info.description,
+        command: info.command,
+        outputSize: size,
+        mtimeMs,
+        ageMinutes: Math.max(0, Math.round((Date.now() - mtimeMs) / 60000))
+      });
+    }
+  }
+
+  return activeTasks;
+}
+
 const TZ_MAP = {
   'EST': 'America/New_York',
   'EDT': 'America/New_York',
@@ -707,6 +791,7 @@ function scanAgents() {
           resumedCount: 0,
           lastResumeAttemptAt: null,
           activeSubagents: [],
+          activeTasks: [],
         };
         state.agents.set(s.sessionId, agent);
         addEvent('INFO', agent.sessionId, agent.name, `Discovered agent session (PID ${pid || 'none'}, last message ${s.ageMinutes}m ago)`);
@@ -848,7 +933,11 @@ function scanAgents() {
         const { activeSubagents } = scanSubagentsForSession(s.projectFolder, s.sessionId, isProcessAlive, now);
         agent.activeSubagents = activeSubagents;
 
-        if (activeSubagents && activeSubagents.length > 0) {
+        // Scan active background tasks in Temp/claude/<projectFolder>/<sessionId>/tasks
+        const activeTasks = detectActiveBackgroundTasks(s.projectFolder, s.sessionId, isProcessAlive, s.turns);
+        agent.activeTasks = activeTasks;
+
+        if ((activeSubagents && activeSubagents.length > 0) || (activeTasks && activeTasks.length > 0)) {
           if (agent.status !== 'LIMITED' && agent.status !== 'PAUSED' && agent.status !== 'DISABLED') {
             agent.status = 'ACTIVE';
           }
@@ -1118,6 +1207,7 @@ function getSanitizedStatus() {
     features: getAgentEffectiveFeatures(a.sessionId),
     overrides: config.agentOverrides?.[a.sessionId] || null,
     activeSubagents: a.activeSubagents || [],
+    activeTasks: a.activeTasks || [],
   }));
 
   agentList.sort((a, b) => (b.messageTimeMs || 0) - (a.messageTimeMs || 0));

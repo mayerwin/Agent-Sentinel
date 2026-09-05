@@ -649,6 +649,24 @@ function renderAgentCard(agent) {
         </div>
       ` : ''}
 
+      ${agent.activeTasks && agent.activeTasks.length > 0 ? `
+        <div class="agent-tasks-panel">
+          <div class="tasks-header">
+            <span class="tasks-icon">⏳</span>
+            <span class="tasks-title">${agent.activeTasks.length} Background Task${agent.activeTasks.length > 1 ? 's' : ''} Running:</span>
+          </div>
+          <div class="tasks-list">
+            ${agent.activeTasks.map(t => `
+              <div class="task-item">
+                <span class="task-badge">RUNNING</span>
+                <span class="task-desc" title="${escapeHtml(t.command || t.description)}">${escapeHtml(truncate(t.description || t.taskId, 65))}</span>
+                <span class="task-time">${t.ageMinutes}m ago</span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+
       <div class="agent-footer">
         <div class="agent-footer-info">
           ${agent.verification ? `
