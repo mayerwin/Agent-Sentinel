@@ -383,6 +383,8 @@ const TZ_MAP = {
   'CDT': 'America/Chicago',
   'MST': 'America/Denver',
   'MDT': 'America/Denver',
+  'HST': 'Pacific/Honolulu',
+  'HDT': 'Pacific/Honolulu',
   'UTC': 'UTC',
   'GMT': 'UTC',
   'BST': 'Europe/London',
@@ -390,48 +392,15 @@ const TZ_MAP = {
   'CEST': 'Europe/Paris',
 };
 
-function getUtcForTimeInZone(hours, mins, targetTz, now = new Date()) {
-  const resolvedTz = TZ_MAP[targetTz] || targetTz;
-  try {
-    const dtf = new Intl.DateTimeFormat('en-US', {
-      timeZone: resolvedTz,
-      year: 'numeric',
-      month: 'numeric',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: 'numeric',
-      second: 'numeric',
-      hour12: false
-    });
-
-    const parts = Object.fromEntries(dtf.formatToParts(now).map(p => [p.type, p.value]));
-    const tzYear = parseInt(parts.year, 10);
-    const tzMonth = parseInt(parts.month, 10);
-    const tzDay = parseInt(parts.day, 10);
-    const tzHour = parseInt(parts.hour, 10);
-    const tzMin = parseInt(parts.minute, 10);
-
-    let isTomorrow = false;
-    if (hours < tzHour || (hours === tzHour && mins < tzMin - 2)) {
-      isTomorrow = true;
-    }
-
-    const targetDay = isTomorrow ? tzDay + 1 : tzDay;
-    const guessUtc = new Date(Date.UTC(tzYear, tzMonth - 1, targetDay, hours, mins, 0, 0));
-
-    const tzPartsAtGuess = Object.fromEntries(dtf.formatToParts(guessUtc).map(p => [p.type, p.value]));
-    const hAtGuess = parseInt(tzPartsAtGuess.hour, 10);
-    const mAtGuess = parseInt(tzPartsAtGuess.minute, 10);
-
-    const diffMinutes = (hAtGuess * 60 + mAtGuess) - (hours * 60 + mins);
-    return guessUtc.getTime() - (diffMinutes * 60000);
-  } catch (e) {
-    const target = new Date(now);
-    target.setHours(hours, mins, 0, 0);
-    if (target.getTime() < now.getTime() - 120000) target.setDate(target.getDate() + 1);
-    return target.getTime();
-  }
-}
+const DAY_MAP = {
+  'sun': 0, 'sunday': 0,
+  'mon': 1, 'monday': 1,
+  'tue': 2, 'tues': 2, 'tuesday': 2,
+  'wed': 3, 'wednesday': 3,
+  'thu': 4, 'thur': 4, 'thurs': 4, 'thursday': 4,
+  'fri': 5, 'friday': 5,
+  'sat': 6, 'saturday': 6
+};
 
 function parseRateLimitNotice(text, now = new Date()) {
   if (!text || typeof text !== 'string') return null;
@@ -446,24 +415,64 @@ function parseRateLimitNotice(text, now = new Date()) {
   const kind = isWeeklyLimit ? 'weekly_limit' : 'session_limit';
 
   const timeMatch = text.match(/resets?\s+(?:at\s+)?(?:([a-zA-Z]+)\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\)|\s+([A-Z]{3,4}))?/i);
-
   let resetAtMs = null;
-  let resetAtIso = null;
 
   if (timeMatch) {
     const [_, dayOfWeek, rawHours, rawMins, ampm, parenTz, suffixTz] = timeMatch;
     let hours = parseInt(rawHours, 10);
     const mins = rawMins ? parseInt(rawMins, 10) : 0;
-    const tz = parenTz || suffixTz || null;
+    const rawTz = parenTz || suffixTz || 'UTC';
+    const tz = TZ_MAP[rawTz] || rawTz;
 
     if (ampm) {
       if (ampm.toLowerCase() === 'pm' && hours < 12) hours += 12;
       if (ampm.toLowerCase() === 'am' && hours === 12) hours = 0;
     }
 
-    if (tz) {
-      resetAtMs = getUtcForTimeInZone(hours, mins, tz, now);
-    } else {
+    try {
+      const dtf = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        year: 'numeric', month: 'numeric', day: 'numeric',
+        hour: 'numeric', minute: 'numeric', second: 'numeric',
+        weekday: 'short',
+        hour12: false
+      });
+
+      const parts = Object.fromEntries(dtf.formatToParts(now).map(p => [p.type, p.value]));
+      let tzYear = parseInt(parts.year, 10);
+      let tzMonth = parseInt(parts.month, 10);
+      let tzDay = parseInt(parts.day, 10);
+      const tzHour = parseInt(parts.hour, 10);
+      const tzMin = parseInt(parts.minute, 10);
+
+      let addDays = 0;
+      if (dayOfWeek && DAY_MAP[dayOfWeek.toLowerCase()] !== undefined) {
+        const targetWeekday = DAY_MAP[dayOfWeek.toLowerCase()];
+        const currentWeekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.weekday);
+        addDays = (targetWeekday - currentWeekday + 7) % 7;
+        if (addDays === 0 && (hours < tzHour || (hours === tzHour && mins <= tzMin))) {
+          addDays = 7;
+        }
+      } else {
+        if (hours < tzHour || (hours === tzHour && mins < tzMin - 1)) {
+          addDays = 1;
+        }
+      }
+
+      const approx = new Date(Date.UTC(tzYear, tzMonth - 1, tzDay + addDays, hours, mins, 0));
+      const approxParts = Object.fromEntries(dtf.formatToParts(approx).map(p => [p.type, p.value]));
+      const asTzUtc = new Date(Date.UTC(
+        parseInt(approxParts.year, 10),
+        parseInt(approxParts.month, 10) - 1,
+        parseInt(approxParts.day, 10),
+        parseInt(approxParts.hour, 10) % 24,
+        parseInt(approxParts.minute, 10),
+        parseInt(approxParts.second, 10)
+      ));
+      const offsetMs = asTzUtc.getTime() - approx.getTime();
+      resetAtMs = approx.getTime() - offsetMs;
+    } catch (e) {
+      console.error('Timezone parse error in parseRateLimitNotice:', e);
       const target = new Date(now);
       target.setHours(hours, mins, 0, 0);
       if (target.getTime() < now.getTime() - 120000) target.setDate(target.getDate() + 1);
@@ -480,6 +489,7 @@ function parseRateLimitNotice(text, now = new Date()) {
     }
   }
 
+  let resetAtIso = null;
   if (resetAtMs) {
     resetAtIso = new Date(resetAtMs).toISOString();
   }
