@@ -44,6 +44,13 @@ const hibernateCountdownSec = document.getElementById('hibernateCountdownSec');
 const hibernationDesc = document.getElementById('hibernationDesc');
 const btnCancelHibernate = document.getElementById('btnCancelHibernate');
 
+// Settling Alert Elements
+const settlingBanner = document.getElementById('settlingBanner');
+const settlingCountdownSec = document.getElementById('settlingCountdownSec');
+const settlingDesc = document.getElementById('settlingDesc');
+const btnDisarmSettling = document.getElementById('btnDisarmSettling');
+
+
 // Settings Modal Elements
 const btnOpenSettings = document.getElementById('btnOpenSettings');
 const btnCloseSettings = document.getElementById('btnCloseSettings');
@@ -59,6 +66,7 @@ const modalToggleAutoFix = document.getElementById('modalToggleAutoFix');
 const modalToggleAutoImprove = document.getElementById('modalToggleAutoImprove');
 const modalToggleAuthorizeSubagents = document.getElementById('modalToggleAuthorizeSubagents');
 const inputVerifyTimeout = document.getElementById('inputVerifyTimeout');
+const inputAuditRetention = document.getElementById('inputAuditRetention');
 
 // Prompt Inspector Elements
 const btnOpenPrompts = document.getElementById('btnOpenPrompts');
@@ -109,16 +117,24 @@ function updateCountdowns() {
   }
 
   if (Number.isFinite(minResetMs)) {
-    const diff = Math.max(0, minResetMs - now);
-    heroCountdownTimer.textContent = formatTimeRemaining(diff);
+    const diff = minResetMs - now;
+    if (diff <= 0) {
+      heroCountdownTimer.textContent = 'READY — Auto-resuming...';
+    } else {
+      heroCountdownTimer.textContent = formatTimeRemaining(diff);
+    }
     heroResetTarget.textContent = `Resets at: ${new Date(minResetMs).toLocaleTimeString()} (${new Date(minResetMs).toLocaleDateString()})`;
   }
 
   document.querySelectorAll('.live-card-countdown').forEach(el => {
     const resetMs = parseInt(el.dataset.resetMs, 10);
     if (resetMs) {
-      const cDiff = Math.max(0, resetMs - now);
-      el.textContent = formatTimeRemaining(cDiff);
+      const cDiff = resetMs - now;
+      if (cDiff <= 0) {
+        el.textContent = 'READY — Auto-resuming...';
+      } else {
+        el.textContent = formatTimeRemaining(cDiff);
+      }
     }
   });
 }
@@ -164,6 +180,37 @@ function handleHibernationBanner(hibernation) {
   }, 250);
 }
 
+let settlingInterval = null;
+
+function handleSettlingBanner(settling) {
+  if (!settling || !settling.settling) {
+    if (settlingBanner) settlingBanner.style.display = 'none';
+    if (settlingInterval) clearInterval(settlingInterval);
+    return;
+  }
+
+  const remaining = Math.max(0, Math.ceil((settling.targetTimestamp - Date.now()) / 1000));
+  if (remaining <= 0) {
+    if (settlingBanner) settlingBanner.style.display = 'none';
+    if (settlingInterval) clearInterval(settlingInterval);
+    return;
+  }
+
+  if (settlingBanner) settlingBanner.style.display = 'flex';
+  if (settlingCountdownSec) settlingCountdownSec.textContent = remaining;
+
+  if (settlingInterval) clearInterval(settlingInterval);
+  settlingInterval = setInterval(() => {
+    const rem = Math.max(0, Math.ceil((settling.targetTimestamp - Date.now()) / 1000));
+    if (settlingCountdownSec) settlingCountdownSec.textContent = rem;
+    if (rem <= 0) {
+      clearInterval(settlingInterval);
+      if (settlingBanner) settlingBanner.style.display = 'none';
+    }
+  }, 250);
+}
+
+
 function showToast(message, icon = 'ℹ️') {
   const toast = document.createElement('div');
   toast.className = 'toast';
@@ -192,9 +239,10 @@ function syncSettingsToModal(cfg) {
   if (typeof cfg.defaultAutoImprove === 'boolean') modalToggleAutoImprove.checked = cfg.defaultAutoImprove;
   if (typeof cfg.authorizeSubagents === 'boolean') modalToggleAuthorizeSubagents.checked = cfg.authorizeSubagents;
   if (cfg.verificationTimeoutSeconds) inputVerifyTimeout.value = cfg.verificationTimeoutSeconds;
+  if (inputAuditRetention && cfg.auditRetentionDays) inputAuditRetention.value = cfg.auditRetentionDays;
   
   if (statLookbackLabel) {
-    statLookbackLabel.textContent = `Past ${cfg.lookbackHours || 6}h`;
+    statLookbackLabel.textContent = `Past ${cfg.lookbackHours || 24}h`;
   }
 
   // Update Pause button state
@@ -229,7 +277,7 @@ function getDemoState() {
     systemTime: new Date().toISOString(),
     config: {
       globalPaused: false,
-      lookbackHours: 6,
+      lookbackHours: 24,
       recheckIntervalSeconds: 120,
       hibernateOnWeeklyLimit: true,
       hibernateOnAllCompleted: false,
@@ -420,11 +468,16 @@ function getDemoEvents() {
 function renderDashboard(status) {
   currentStatus = status;
 
-  if (status.config) {
+  if (status.config && (!settingsModal || settingsModal.style.display === 'none' || settingsModal.style.display === '')) {
     syncSettingsToModal(status.config);
   }
 
   handleHibernationBanner(status.hibernation);
+  if (status.settling) {
+    handleSettlingBanner(status.settling);
+  } else if (!status.hibernation?.pending) {
+    handleSettlingBanner(null);
+  }
 
   statTotalAgents.textContent = status.stats.totalScanned || 0;
   statActiveAgents.textContent = status.stats.activeRunning || 0;
@@ -489,49 +542,39 @@ function renderDashboard(status) {
   }
 
   if (filtered.length === 0) {
-    agentsContainer.innerHTML = `
-      <div class="empty-state">
-        <p>No agents matching filter "${currentFilter}"</p>
-      </div>
-    `;
+    if (lastRenderedAgentsSignature !== `empty_${currentFilter}`) {
+      lastRenderedAgentsSignature = `empty_${currentFilter}`;
+      agentsContainer.innerHTML = `
+        <div class="empty-state">
+          <p>No agents matching filter "${currentFilter}"</p>
+        </div>
+      `;
+    }
     return;
   }
 
-  agentsContainer.innerHTML = filtered.map(agent => renderAgentCard(agent)).join('');
+  const currentRenderSignature = JSON.stringify(filtered.map(a => ({
+    sessionId: a.sessionId,
+    status: a.status,
+    enabled: a.enabled,
+    features: a.features,
+    llmEvaluation: a.llmEvaluation,
+    activeSubagents: a.activeSubagents?.length,
+    activeTasks: a.activeTasks?.length,
+    verification: a.verification,
+    limitNotice: a.limitNotice,
+    ageMinutes: a.ageMinutes,
+    lastAssistantMessage: a.lastAssistantMessage
+  })));
+
+  if (currentRenderSignature !== lastRenderedAgentsSignature) {
+    lastRenderedAgentsSignature = currentRenderSignature;
+    agentsContainer.innerHTML = filtered.map(agent => renderAgentCard(agent)).join('');
+  }
   updateCountdowns();
-
-  document.querySelectorAll('.agent-toggle-monitored').forEach(chk => {
-    chk.addEventListener('change', (e) => {
-      const sid = e.currentTarget.dataset.sessionId;
-      const enabled = e.currentTarget.checked;
-      toggleAgentMonitoring(sid, enabled);
-    });
-  });
-
-  document.querySelectorAll('.agent-toggle-feature').forEach(chk => {
-    chk.addEventListener('change', (e) => {
-      const sid = e.currentTarget.dataset.sessionId;
-      const feature = e.currentTarget.dataset.feature;
-      const enabled = e.currentTarget.checked;
-      toggleAgentFeature(sid, feature, enabled);
-    });
-  });
-
-  document.querySelectorAll('.btn-manual-action').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const sid = e.currentTarget.dataset.sessionId;
-      const action = e.currentTarget.dataset.action;
-      triggerAgentAction(sid, action);
-    });
-  });
-
-  document.querySelectorAll('.btn-resume-agent').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const sid = e.currentTarget.dataset.sessionId;
-      triggerAgentAction(sid, 'continue');
-    });
-  });
 }
+
+let lastRenderedAgentsSignature = '';
 
 function renderAgentCard(agent) {
   const isEnabled = agent.enabled !== false && !currentStatus?.config?.globalPaused;
@@ -717,13 +760,29 @@ function renderAgentCard(agent) {
   `;
 }
 
+function formatEventTimestamp(isoStr) {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday = d.toDateString() === yesterday.toDateString();
+
+  const timePart = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  if (isToday) return `Today ${timePart}`;
+  if (isYesterday) return `Yesterday ${timePart}`;
+  const datePart = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return `${datePart} ${timePart}`;
+}
+
 function renderEvents(events) {
   if (!events || events.length === 0) {
     eventsContainer.innerHTML = '<div class="empty-state"><p>No events logged yet</p></div>';
     return;
   }
   eventsContainer.innerHTML = events.map(evt => {
-    const timeStr = new Date(evt.timestamp).toLocaleTimeString();
+    const timeStr = formatEventTimestamp(evt.timestamp);
     return `
       <div class="event-entry">
         <div class="event-top">
@@ -805,7 +864,7 @@ async function shutdownServer() {
 }
 
 async function saveSettingsFromModal() {
-  const lookbackHours = parseInt(inputLookback.value, 10) || 6;
+  const lookbackHours = parseInt(inputLookback.value, 10) || 24;
   const recheckIntervalSeconds = parseInt(inputRecheck.value, 10) || 120;
   const hibernateOnWeeklyLimit = modalToggleHibernate.checked;
   const hibernateOnAllCompleted = modalToggleHibernateOnCompletion.checked;
@@ -814,6 +873,7 @@ async function saveSettingsFromModal() {
   const defaultAutoImprove = modalToggleAutoImprove.checked;
   const authorizeSubagents = modalToggleAuthorizeSubagents.checked;
   const verificationTimeoutSeconds = parseInt(inputVerifyTimeout.value, 10) || 60;
+  const auditRetentionDays = inputAuditRetention ? (parseInt(inputAuditRetention.value, 10) || 30) : 30;
 
   if (isDemo) {
     showToast('Configuration saved (demo mode)!', '⚙️');
@@ -835,7 +895,8 @@ async function saveSettingsFromModal() {
         defaultAutoFix,
         defaultAutoImprove,
         authorizeSubagents,
-        verificationTimeoutSeconds
+        verificationTimeoutSeconds,
+        auditRetentionDays
       })
     });
     const data = await res.json();
@@ -948,6 +1009,21 @@ async function resumeAgentManually(sessionId) {
 function initSSE() {
   if (isDemo) return;
   const evtSource = new EventSource('/api/stream');
+
+  evtSource.onopen = () => {
+    if (sentinelStatusBadge && !currentStatus?.config?.globalPaused) {
+      sentinelStatusBadge.className = 'sentinel-badge live';
+      sentinelStatusText.textContent = 'LLM COGNITIVE MONITOR';
+    }
+  };
+
+  evtSource.onerror = () => {
+    if (sentinelStatusBadge && !currentStatus?.config?.globalPaused) {
+      sentinelStatusBadge.className = 'sentinel-badge offline';
+      sentinelStatusText.textContent = 'RECONNECTING...';
+    }
+  };
+
   evtSource.addEventListener('status', (e) => {
     try {
       const data = JSON.parse(e.data);
@@ -959,6 +1035,13 @@ function initSSE() {
     try {
       const hib = JSON.parse(e.data);
       handleHibernationBanner(hib);
+    } catch (err) {}
+  });
+
+  evtSource.addEventListener('settling_status', (e) => {
+    try {
+      const settling = JSON.parse(e.data);
+      handleSettlingBanner(settling);
     } catch (err) {}
   });
 
@@ -994,22 +1077,29 @@ function escapeHtml(str) {
 }
 
 function truncate(str, max = 80) {
-  if (!str) return '';
-  return str.length > max ? str.slice(0, max) + '…' : str;
+  if (str === null || str === undefined) return '';
+  const s = String(str);
+  return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
 // Event Listeners
-btnTogglePause.addEventListener('click', toggleGlobalPause);
+if (btnTogglePause) btnTogglePause.addEventListener('click', toggleGlobalPause);
 
-btnExitServer.addEventListener('click', () => {
-  exitModal.style.display = 'flex';
-});
-btnCloseExit.addEventListener('click', () => {
-  exitModal.style.display = 'none';
-});
-btnCancelExit.addEventListener('click', () => {
-  exitModal.style.display = 'none';
-});
+if (btnExitServer) {
+  btnExitServer.addEventListener('click', () => {
+    if (exitModal) exitModal.style.display = 'flex';
+  });
+}
+if (btnCloseExit) {
+  btnCloseExit.addEventListener('click', () => {
+    if (exitModal) exitModal.style.display = 'none';
+  });
+}
+if (btnCancelExit) {
+  btnCancelExit.addEventListener('click', () => {
+    if (exitModal) exitModal.style.display = 'none';
+  });
+}
 // Prompt Inspector Modal Logic
 async function fetchAndRenderPrompts(targetTab = null) {
   let promptData = null;
@@ -1156,45 +1246,75 @@ if (promptsModal) {
   });
 }
 
-btnConfirmExit.addEventListener('click', () => {
-  exitModal.style.display = 'none';
-  shutdownServer();
-});
-exitModal.addEventListener('click', (e) => {
-  if (e.target === exitModal) exitModal.style.display = 'none';
-});
+if (btnConfirmExit) {
+  btnConfirmExit.addEventListener('click', () => {
+    if (exitModal) exitModal.style.display = 'none';
+    shutdownServer();
+  });
+}
+if (exitModal) {
+  exitModal.addEventListener('click', (e) => {
+    if (e.target === exitModal) exitModal.style.display = 'none';
+  });
+}
 
-btnOpenSettings.addEventListener('click', () => {
-  if (currentStatus && currentStatus.config) syncSettingsToModal(currentStatus.config);
-  settingsModal.style.display = 'flex';
-});
+if (btnOpenSettings) {
+  btnOpenSettings.addEventListener('click', () => {
+    if (currentStatus && currentStatus.config) syncSettingsToModal(currentStatus.config);
+    if (settingsModal) settingsModal.style.display = 'flex';
+  });
+}
 
-btnCloseSettings.addEventListener('click', () => {
-  settingsModal.style.display = 'none';
-});
+if (btnCloseSettings) {
+  btnCloseSettings.addEventListener('click', () => {
+    if (settingsModal) settingsModal.style.display = 'none';
+  });
+}
 
-btnCancelSettings.addEventListener('click', () => {
-  settingsModal.style.display = 'none';
-});
+if (btnCancelSettings) {
+  btnCancelSettings.addEventListener('click', () => {
+    if (settingsModal) settingsModal.style.display = 'none';
+  });
+}
 
-btnSaveSettings.addEventListener('click', saveSettingsFromModal);
+if (btnSaveSettings) {
+  btnSaveSettings.addEventListener('click', saveSettingsFromModal);
+}
 
-settingsModal.addEventListener('click', (e) => {
-  if (e.target === settingsModal) settingsModal.style.display = 'none';
-});
+if (settingsModal) {
+  settingsModal.addEventListener('click', (e) => {
+    if (e.target === settingsModal) settingsModal.style.display = 'none';
+  });
+}
 
-btnCancelHibernate.addEventListener('click', cancelHibernateAction);
+if (btnCancelHibernate) {
+  btnCancelHibernate.addEventListener('click', cancelHibernateAction);
+}
 
-btnScanNow.addEventListener('click', async () => {
-  showToast('Scanning active Claude Code transcripts...', '🔍');
-  if (!isDemo) await fetch('/api/scan', { method: 'POST' });
-  fetchStatus();
-  fetchEvents();
-});
+if (btnScanNow) {
+  btnScanNow.addEventListener('click', async () => {
+    showToast('Scanning active Claude Code transcripts...', '🔍');
+    if (!isDemo) await fetch('/api/scan', { method: 'POST' });
+    fetchStatus();
+    fetchEvents();
+  });
+}
 
-btnClearLogs.addEventListener('click', () => {
-  eventsContainer.innerHTML = '<div class="empty-state"><p>Logs cleared</p></div>';
-});
+if (btnClearLogs) {
+  btnClearLogs.addEventListener('click', async () => {
+    if (confirm('Clear all audit logs from memory and disk?')) {
+      if (!isDemo) {
+        try {
+          await fetch('/api/events/clear', { method: 'POST' });
+        } catch (e) {
+          console.error('Failed to clear logs:', e);
+        }
+      }
+      if (eventsContainer) eventsContainer.innerHTML = '<div class="empty-state"><p>Logs cleared</p></div>';
+      showToast('Audit stream cleared', '🗑️');
+    }
+  });
+}
 
 filterTabs.forEach(tab => {
   tab.addEventListener('click', (e) => {
@@ -1203,6 +1323,68 @@ filterTabs.forEach(tab => {
     currentFilter = e.currentTarget.dataset.filter;
     if (currentStatus) renderDashboard(currentStatus);
   });
+});
+
+if (agentsContainer) {
+  agentsContainer.addEventListener('change', (e) => {
+    if (e.target.matches('.agent-toggle-monitored')) {
+      const sid = e.target.dataset.sessionId;
+      const enabled = e.target.checked;
+      toggleAgentMonitoring(sid, enabled);
+    } else if (e.target.matches('.agent-toggle-feature')) {
+      const sid = e.target.dataset.sessionId;
+      const feature = e.target.dataset.feature;
+      const enabled = e.target.checked;
+      toggleAgentFeature(sid, feature, enabled);
+    }
+  });
+
+  agentsContainer.addEventListener('click', (e) => {
+    const btnManual = e.target.closest('.btn-manual-action');
+    if (btnManual) {
+      const sid = btnManual.dataset.sessionId;
+      const action = btnManual.dataset.action;
+      triggerAgentAction(sid, action);
+      return;
+    }
+    const btnResume = e.target.closest('.btn-resume-agent');
+    if (btnResume) {
+      const sid = btnResume.dataset.sessionId;
+      triggerAgentAction(sid, 'continue');
+      return;
+    }
+  });
+}
+
+if (btnDisarmSettling) {
+  btnDisarmSettling.addEventListener('click', async () => {
+    try {
+      const res = await fetch('/api/cancel-hibernation', { method: 'POST' });
+      const data = await res.json();
+      if (data.ok) {
+        showToast('Settling countdown disarmed!', '🛡️');
+        if (settlingBanner) settlingBanner.style.display = 'none';
+        if (settlingInterval) clearInterval(settlingInterval);
+        fetchStatus();
+      }
+    } catch (e) {
+      showToast(`Error disarming: ${e.message}`, '❌');
+    }
+  });
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (promptsModal && promptsModal.style.display === 'flex') {
+      promptsModal.style.display = 'none';
+    }
+    if (settingsModal && settingsModal.style.display === 'flex') {
+      settingsModal.style.display = 'none';
+    }
+    if (exitModal && exitModal.style.display === 'flex') {
+      exitModal.style.display = 'none';
+    }
+  }
 });
 
 fetchStatus();

@@ -86,6 +86,18 @@
       <button class="btn btn-action btn-danger" id="btnCancelHibernate">Cancel Hibernation</button>
     </div>
 
+    <!-- Settling Indicator Banner -->
+    <div class="settling-alert-banner" id="settlingBanner" style="display: none;">
+      <div class="settling-alert-content">
+        <span class="settling-icon">💤</span>
+        <div>
+          <div class="settling-alert-title">ALL AGENTS COMPLETED — VERIFYING IDLE STABILITY (<span id="settlingCountdownSec">90</span>s)</div>
+          <div class="settling-alert-desc">Sentinel is verifying no background subagents or encodes reactivate before initiating hibernation.</div>
+        </div>
+      </div>
+      <button class="btn btn-outline btn-xs" id="btnDisarmSettling">Disarm</button>
+    </div>
+
     <!-- Main Content Layout -->
     <main class="main-layout">
       <!-- Stats Overview Bar -->
@@ -216,7 +228,7 @@
               <span class="setting-desc">Only inspect agents with messages timestamped in the last N hours.</span>
             </div>
             <div class="setting-input-wrap">
-              <input type="number" id="inputLookback" min="1" max="168" value="6" class="setting-number-input">
+              <input type="number" id="inputLookback" min="1" max="168" value="24" class="setting-number-input">
               <span class="input-suffix">hrs</span>
             </div>
           </div>
@@ -230,6 +242,18 @@
             <div class="setting-input-wrap">
               <input type="number" id="inputRecheck" min="15" max="3600" value="120" class="setting-number-input">
               <span class="input-suffix">sec</span>
+            </div>
+          </div>
+
+          <!-- Audit Log Retention Days -->
+          <div class="setting-item">
+            <div class="setting-info">
+              <label class="setting-title" for="inputAuditRetention">Audit Log Retention (Days)</label>
+              <span class="setting-desc">Keep audit stream events persisted on disk for up to N days across restarts (default: 30 days).</span>
+            </div>
+            <div class="setting-input-wrap">
+              <input type="number" id="inputAuditRetention" min="1" max="365" value="30" class="setting-number-input">
+              <span class="input-suffix">days</span>
             </div>
           </div>
 

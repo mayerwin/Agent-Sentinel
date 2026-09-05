@@ -149,6 +149,17 @@ body {
   100% { transform: scale(0.95); opacity: 1; }
 }
 
+.sentinel-badge.offline {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #f87171;
+}
+.sentinel-badge.offline .pulse-dot {
+  background-color: #ef4444;
+  box-shadow: 0 0 10px #ef4444;
+  animation: pulseRed 1.2s infinite;
+}
+
 .system-time-tag {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -329,6 +340,41 @@ input:checked + .slider:before {
 .hibernation-alert-desc {
   font-size: 12px;
   color: #fca5a5;
+}
+
+/* Settling Indicator Banner */
+.settling-alert-banner {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.18), rgba(168, 85, 247, 0.15));
+  border-bottom: 2px solid #6366f1;
+  padding: 12px 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.25);
+  z-index: 98;
+}
+.settling-alert-content {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.settling-icon { font-size: 26px; }
+.settling-alert-title {
+  font-family: var(--font-heading);
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #c7d2fe;
+  letter-spacing: 0.5px;
+}
+#settlingCountdownSec {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  color: #a5b4fc;
+}
+.settling-alert-desc {
+  font-size: 12px;
+  color: #cbd5e1;
 }
 
 /* Layout */

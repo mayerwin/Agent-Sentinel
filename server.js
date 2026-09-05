@@ -24,6 +24,8 @@ const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
 const AM_DIR = 'C:\\Users\\erwin\\Dropbox\\Projects\\GitHub\\Agent-Manager';
 const AM_QUEUE_DIR = path.join(AM_DIR, '.data', 'queue');
 const CONFIG_FILE = path.join(__dirname, 'config.json');
+const EVENTS_FILE = path.join(__dirname, 'events.jsonl');
+const RESUMES_FILE = path.join(__dirname, 'resumes.json');
 const SENTINEL_DIR = path.resolve(__dirname).toLowerCase();
 
 function isSentinelPathOrFolder(cwd, projectFolder) {
@@ -52,6 +54,43 @@ function isSentinelPathOrFolder(cwd, projectFolder) {
   return false;
 }
 
+function reconstructCwdFromProjectFolder(projectFolder) {
+  if (!projectFolder || typeof projectFolder !== 'string') return '';
+  const driveMatch = projectFolder.match(/^([a-zA-Z])--(.*)$/);
+  if (!driveMatch) return projectFolder;
+
+  const drive = driveMatch[1].toUpperCase() + ':\\';
+  const rest = driveMatch[2];
+  const tokens = rest.split('-');
+  let currentPath = drive;
+  let i = 0;
+
+  while (i < tokens.length) {
+    let matchedSegment = null;
+    for (let j = tokens.length; j > i; j--) {
+      const segHyphen = tokens.slice(i, j).join('-');
+      const segSpace = tokens.slice(i, j).join(' ');
+      if (fs.existsSync(path.join(currentPath, segHyphen))) {
+        matchedSegment = segHyphen;
+        currentPath = path.join(currentPath, segHyphen);
+        i = j;
+        break;
+      }
+      if (fs.existsSync(path.join(currentPath, segSpace))) {
+        matchedSegment = segSpace;
+        currentPath = path.join(currentPath, segSpace);
+        i = j;
+        break;
+      }
+    }
+    if (!matchedSegment) {
+      currentPath = path.join(currentPath, tokens[i]);
+      i++;
+    }
+  }
+  return currentPath;
+}
+
 function findClaudeBinary() {
   const roots = [
     path.join(HOME, '.vscode', 'extensions'),
@@ -78,6 +117,14 @@ function findClaudeBinary() {
     candidates.sort((a, b) => b.localeCompare(a));
     return candidates[0];
   }
+
+  if (process.platform === 'win32') {
+    const npmCmd = path.join(HOME, 'AppData', 'Roaming', 'npm', 'claude.cmd');
+    if (fs.existsSync(npmCmd)) return npmCmd;
+    const localExe = path.join(HOME, 'AppData', 'Local', 'Programs', 'claude', 'claude.exe');
+    if (fs.existsSync(localExe)) return localExe;
+  }
+
   return 'claude.exe';
 }
 
@@ -138,7 +185,7 @@ Run all test suites, linters, and type-checks. Add test coverage for newly optim
 // Default Configuration
 let config = {
   globalPaused: false,
-  lookbackHours: 6,
+  lookbackHours: 24,
   recheckIntervalSeconds: 120,
   hibernateOnWeeklyLimit: false,
   hibernateOnAllCompleted: false,
@@ -148,6 +195,7 @@ let config = {
   defaultAutoImprove: false,
   authorizeSubagents: true,
   verificationTimeoutSeconds: 60,
+  auditRetentionDays: 30,
   disabledSessionIds: [],
   agentOverrides: {}
 };
@@ -173,13 +221,98 @@ function saveConfig() {
   } catch (e) {}
 }
 
-// Global In-Memory State
+function loadPersistedEvents() {
+  if (!fs.existsSync(EVENTS_FILE)) return [];
+  try {
+    const cutoffMs = Date.now() - (config.auditRetentionDays || 30) * 86400000;
+    const content = fs.readFileSync(EVENTS_FILE, 'utf8');
+    const lines = content.split('\n');
+    const loaded = [];
+    let prunedCount = 0;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const evt = JSON.parse(line);
+        const t = evt.timestamp ? new Date(evt.timestamp).getTime() : 0;
+        if (t >= cutoffMs) {
+          loaded.push(evt);
+        } else {
+          prunedCount++;
+        }
+      } catch (_) {}
+    }
+    // Sort descending by timestamp (newest first)
+    loaded.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    if (prunedCount > 0) {
+      setTimeout(() => pruneEventsFile(), 1000);
+    }
+    return loaded;
+  } catch (err) {
+    console.error('Failed to load persisted events:', err);
+    return [];
+  }
+}
+
+function pruneEventsFile() {
+  try {
+    if (!fs.existsSync(EVENTS_FILE)) return;
+    const cutoffMs = Date.now() - (config.auditRetentionDays || 30) * 86400000;
+    const content = fs.readFileSync(EVENTS_FILE, 'utf8');
+    const lines = content.split('\n');
+    const keptLines = [];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const evt = JSON.parse(line);
+        const t = evt.timestamp ? new Date(evt.timestamp).getTime() : 0;
+        if (t >= cutoffMs) {
+          keptLines.push(line.trim());
+        }
+      } catch (_) {}
+    }
+    const tmpFile = EVENTS_FILE + '.tmp';
+    fs.writeFileSync(tmpFile, keptLines.length > 0 ? keptLines.join('\n') + '\n' : '', 'utf8');
+    fs.renameSync(tmpFile, EVENTS_FILE);
+  } catch (err) {
+    console.error('Failed to prune events.jsonl:', err);
+  }
+}
+
+function loadPersistedResumes() {
+  if (!fs.existsSync(RESUMES_FILE)) return [];
+  try {
+    const cutoffMs = Date.now() - (config.auditRetentionDays || 30) * 86400000;
+    const items = JSON.parse(fs.readFileSync(RESUMES_FILE, 'utf8'));
+    if (!Array.isArray(items)) return [];
+    return items.filter(r => {
+      const t = r.triggeredAt ? new Date(r.triggeredAt).getTime() : 0;
+      return t >= cutoffMs;
+    });
+  } catch (_) {
+    return [];
+  }
+}
+
+function savePersistedResumes() {
+  try {
+    const cutoffMs = Date.now() - (config.auditRetentionDays || 30) * 86400000;
+    const toSave = (state.resumes || []).filter(r => {
+      const t = r.triggeredAt ? new Date(r.triggeredAt).getTime() : 0;
+      return t >= cutoffMs;
+    }).slice(0, 200);
+    fs.writeFileSync(RESUMES_FILE, JSON.stringify(toSave, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to save resumes.json:', err);
+  }
+}
+
+// Global State with Persisted History
 const state = {
   startedAt: new Date().toISOString(),
   lastScanAt: null,
   agents: new Map(),
-  events: [],
-  resumes: [],
+  events: loadPersistedEvents(),
+  resumes: loadPersistedResumes(),
   hibernation: {
     pending: false,
     triggerType: null,
@@ -208,7 +341,14 @@ function addEvent(type, sessionId, sessionName, message, metadata = {}) {
     metadata
   };
   state.events.unshift(evt);
-  if (state.events.length > 300) state.events.pop();
+  if (state.events.length > 1000) state.events.pop();
+
+  try {
+    fs.appendFileSync(EVENTS_FILE, JSON.stringify(evt) + '\n', 'utf8');
+  } catch (err) {
+    console.error('Failed to persist event to events.jsonl:', err.message);
+  }
+
   broadcastSSE('event', evt);
   return evt;
 }
@@ -259,6 +399,14 @@ function readLastRawTurns(filePath, maxLines = 15, stats = null) {
 
     const data = { turns, latestMessageTimestamp, lastMeaningfulTurn };
     transcriptCache.set(filePath, { mtimeMs: st.mtimeMs, size: st.size, data });
+    if (transcriptCache.size > 500) {
+      let evicted = 0;
+      for (const k of transcriptCache.keys()) {
+        transcriptCache.delete(k);
+        evicted++;
+        if (evicted >= 100) break;
+      }
+    }
     return data;
   } catch (e) {
     return { turns: [], latestMessageTimestamp: null, lastMeaningfulTurn: null };
@@ -498,19 +646,42 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
 const TZ_MAP = {
   'EST': 'America/New_York',
   'EDT': 'America/New_York',
+  'ET': 'America/New_York',
   'PST': 'America/Los_Angeles',
   'PDT': 'America/Los_Angeles',
+  'PT': 'America/Los_Angeles',
   'CST': 'America/Chicago',
   'CDT': 'America/Chicago',
+  'CT': 'America/Chicago',
   'MST': 'America/Denver',
   'MDT': 'America/Denver',
+  'MT': 'America/Denver',
   'HST': 'Pacific/Honolulu',
   'HDT': 'Pacific/Honolulu',
+  'AKST': 'America/Anchorage',
+  'AKDT': 'America/Anchorage',
   'UTC': 'UTC',
   'GMT': 'UTC',
   'BST': 'Europe/London',
   'CET': 'Europe/Paris',
   'CEST': 'Europe/Paris',
+  'WET': 'Europe/Lisbon',
+  'WEST': 'Europe/Lisbon',
+  'EET': 'Europe/Athens',
+  'EEST': 'Europe/Athens',
+  'MSK': 'Europe/Moscow',
+  'JST': 'Asia/Tokyo',
+  'KST': 'Asia/Seoul',
+  'HKT': 'Asia/Hong_Kong',
+  'SGT': 'Asia/Singapore',
+  'IST': 'Asia/Kolkata',
+  'AEST': 'Australia/Sydney',
+  'AEDT': 'Australia/Sydney',
+  'ACST': 'Australia/Adelaide',
+  'ACDT': 'Australia/Adelaide',
+  'AWST': 'Australia/Perth',
+  'NZST': 'Pacific/Auckland',
+  'NZDT': 'Pacific/Auckland'
 };
 
 const DAY_MAP = {
@@ -523,90 +694,148 @@ const DAY_MAP = {
   'sat': 6, 'saturday': 6
 };
 
+/**
+ * Structured API Error classification (patterned from Agent-Manager @am/core).
+ * Inspects structured turn properties (isApiErrorMessage, error, apiErrorStatus) directly
+ * without relying on brittle text regexes.
+ */
+const TRANSIENT_API_CODES = new Set(['overloaded', 'overloaded_error', 'server_error', 'timeout', 'max_output_tokens']);
+const PERMANENT_API_CODES = new Set(['authentication_failed', 'oauth_org_not_allowed', 'billing_error', 'invalid_request', 'model_not_found']);
+
+function classifyApiError(code, status) {
+  if (code && PERMANENT_API_CODES.has(code)) return 'permanent';
+  if (code && TRANSIENT_API_CODES.has(code)) return 'transient';
+  if (code === 'rate_limit' || status === 429) return 'rate_limit';
+  if (status === 529 || (status >= 500 && status <= 599)) return 'transient';
+  if (status === 400 || status === 401 || status === 403) return 'permanent';
+  return null;
+}
+
+function extractStructuredApiError(turn) {
+  if (!turn || typeof turn !== 'object') return null;
+  const isApi = turn.isApiErrorMessage === true;
+  const code = turn.error || turn.message?.error?.code || turn.message?.error?.type;
+  const rawStatus = turn.apiErrorStatus || turn.message?.error?.status;
+  const status = typeof rawStatus === 'number' ? rawStatus : (rawStatus ? parseInt(rawStatus, 10) : undefined);
+  if (!isApi && !code && !status) return null;
+  const parsedCode = typeof code === 'string' ? code : undefined;
+  const parsedStatus = Number.isFinite(status) ? status : undefined;
+  return {
+    isApiError: isApi,
+    isApiErrorMessage: isApi,
+    code: parsedCode,
+    status: parsedStatus,
+    category: classifyApiError(parsedCode, parsedStatus)
+  };
+}
+
+/**
+ * Extract an explicit IANA timezone from parentheses (e.g. "(Pacific/Honolulu)", "(Europe/Paris)").
+ * If a valid IANA zone is present, it is resolved natively without needing manual abbreviation mapping.
+ */
+function extractIanaZone(text) {
+  if (!text || typeof text !== 'string') return null;
+  const m = text.match(/\(([A-Za-z_]+(?:\/[A-Za-z_]+){0,2}|UTC|GMT)\)/);
+  if (!m || !m[1]) return null;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: m[1] });
+    return m[1];
+  } catch {
+    return null;
+  }
+}
+
 function parseRateLimitNotice(text, now = new Date()) {
   if (!text || typeof text !== 'string') return null;
 
-  const isSessionLimit = /session limit|5-hour limit|usage limit|rate limit|hourly limit|hit your .* limit/i.test(text);
-  const isWeeklyLimit = /weekly (usage )?limit|weekly quota/i.test(text);
+  const isWeeklyLimit = /weekly (?:usage )?limit|weekly quota/i.test(text);
+  const isExplicitLimitNotice = /(?:reached|hit|exceeded) (?:your )?(?:usage|session|weekly|rate) limit/i.test(text);
+  const hasTimeIndicator = /(?:resets?|try again|available again|available|wait until|retry)\s+(?:at\s+|in\s+)?/i.test(text);
 
-  if (!isSessionLimit && !isWeeklyLimit && !/resets?\s+(?:at\s+)?\d+/i.test(text)) {
+  // If not an explicit limit statement and lacks any time indicator, ignore
+  if (!isExplicitLimitNotice && !isWeeklyLimit && !hasTimeIndicator && !/resets?\s+(?:at\s+)?\d+/i.test(text)) {
     return null;
   }
 
   const kind = isWeeklyLimit ? 'weekly_limit' : 'session_limit';
-
-  const timeMatch = text.match(/resets?\s+(?:at\s+)?(?:([a-zA-Z]+)\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\)|\s+([A-Z]{3,4}))?/i);
   let resetAtMs = null;
 
-  if (timeMatch) {
-    const [_, dayOfWeek, rawHours, rawMins, ampm, parenTz, suffixTz] = timeMatch;
-    let hours = parseInt(rawHours, 10);
-    const mins = rawMins ? parseInt(rawMins, 10) : 0;
-    const rawTz = parenTz || suffixTz || 'UTC';
-    const tz = TZ_MAP[rawTz] || rawTz;
+  // 1. Check relative intervals first (e.g. "try again in 45 minutes", "resets in 2 hours")
+  const relMatch = text.match(/(?:resets?|try again|available again|available|wait until|wait|retry)?\s*(?:in|after)\s+(\d+)\s*(m|min|mins|minutes?|h|hr|hrs|hours?)/i);
+  if (relMatch) {
+    const val = parseInt(relMatch[1], 10);
+    const isHours = /h/i.test(relMatch[2]);
+    resetAtMs = now.getTime() + (isHours ? val * 3600000 : val * 60000);
+  } else {
+    // 2. Check absolute time with specific weekday regex (prevents words like "in" from being treated as days)
+    const timeMatch = text.match(/(?:resets?|try again|available again|available|wait until|retry)\s+(?:at\s+)?(?:(Sun(?:day)?|Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:r(?:sday)?)?|Fri(?:day)?|Sat(?:urday)?)\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i);
+    if (timeMatch) {
+      const [_, dayOfWeek, rawHours, rawMins, ampm, parenTz, suffixTz] = timeMatch;
+      let hours = parseInt(rawHours, 10);
+      const mins = rawMins ? parseInt(rawMins, 10) : 0;
+      const rawTz = parenTz || suffixTz || 'UTC';
+      const tz = extractIanaZone(text) || TZ_MAP[rawTz] || rawTz;
 
-    if (ampm) {
-      if (ampm.toLowerCase() === 'pm' && hours < 12) hours += 12;
-      if (ampm.toLowerCase() === 'am' && hours === 12) hours = 0;
-    }
-
-    try {
-      const dtf = new Intl.DateTimeFormat('en-US', {
-        timeZone: tz,
-        year: 'numeric', month: 'numeric', day: 'numeric',
-        hour: 'numeric', minute: 'numeric', second: 'numeric',
-        weekday: 'short',
-        hour12: false
-      });
-
-      const parts = Object.fromEntries(dtf.formatToParts(now).map(p => [p.type, p.value]));
-      let tzYear = parseInt(parts.year, 10);
-      let tzMonth = parseInt(parts.month, 10);
-      let tzDay = parseInt(parts.day, 10);
-      const tzHour = parseInt(parts.hour, 10);
-      const tzMin = parseInt(parts.minute, 10);
-
-      let addDays = 0;
-      if (dayOfWeek && DAY_MAP[dayOfWeek.toLowerCase()] !== undefined) {
-        const targetWeekday = DAY_MAP[dayOfWeek.toLowerCase()];
-        const currentWeekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.weekday);
-        addDays = (targetWeekday - currentWeekday + 7) % 7;
-        if (addDays === 0 && (hours < tzHour || (hours === tzHour && mins <= tzMin))) {
-          addDays = 7;
-        }
-      } else {
-        if (hours < tzHour || (hours === tzHour && mins < tzMin - 1)) {
-          addDays = 1;
-        }
+      if (ampm) {
+        if (ampm.toLowerCase() === 'pm' && hours < 12) hours += 12;
+        if (ampm.toLowerCase() === 'am' && hours === 12) hours = 0;
       }
 
-      const approx = new Date(Date.UTC(tzYear, tzMonth - 1, tzDay + addDays, hours, mins, 0));
-      const approxParts = Object.fromEntries(dtf.formatToParts(approx).map(p => [p.type, p.value]));
-      const asTzUtc = new Date(Date.UTC(
-        parseInt(approxParts.year, 10),
-        parseInt(approxParts.month, 10) - 1,
-        parseInt(approxParts.day, 10),
-        parseInt(approxParts.hour, 10) % 24,
-        parseInt(approxParts.minute, 10),
-        parseInt(approxParts.second, 10)
-      ));
-      const offsetMs = asTzUtc.getTime() - approx.getTime();
-      resetAtMs = approx.getTime() - offsetMs;
-    } catch (e) {
-      console.error('Timezone parse error in parseRateLimitNotice:', e);
-      const target = new Date(now);
-      target.setHours(hours, mins, 0, 0);
-      if (target.getTime() < now.getTime() - 120000) target.setDate(target.getDate() + 1);
-      resetAtMs = target.getTime();
-    }
-  } else {
-    const relMatch = text.match(/in\s+(\d+)\s*(m|min|minutes|h|hours?)/i);
-    if (relMatch) {
-      const val = parseInt(relMatch[1], 10);
-      const isHours = /h/i.test(relMatch[2]);
-      resetAtMs = now.getTime() + (isHours ? val * 3600000 : val * 60000);
-    } else {
+      try {
+        const dtf = new Intl.DateTimeFormat('en-US', {
+          timeZone: tz,
+          year: 'numeric', month: 'numeric', day: 'numeric',
+          hour: 'numeric', minute: 'numeric', second: 'numeric',
+          weekday: 'short',
+          hour12: false
+        });
+
+        const parts = Object.fromEntries(dtf.formatToParts(now).map(p => [p.type, p.value]));
+        let tzYear = parseInt(parts.year, 10);
+        let tzMonth = parseInt(parts.month, 10);
+        let tzDay = parseInt(parts.day, 10);
+        const tzHour = parseInt(parts.hour, 10);
+        const tzMin = parseInt(parts.minute, 10);
+
+        let addDays = 0;
+        if (dayOfWeek && DAY_MAP[dayOfWeek.toLowerCase()] !== undefined) {
+          const targetWeekday = DAY_MAP[dayOfWeek.toLowerCase()];
+          const currentWeekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(parts.weekday);
+          addDays = (targetWeekday - currentWeekday + 7) % 7;
+          if (addDays === 0 && (hours < tzHour || (hours === tzHour && mins <= tzMin))) {
+            addDays = 7;
+          }
+        } else {
+          if (hours < tzHour || (hours === tzHour && mins < tzMin - 1)) {
+            addDays = 1;
+          }
+        }
+
+        const approx = new Date(Date.UTC(tzYear, tzMonth - 1, tzDay + addDays, hours, mins, 0));
+        const approxParts = Object.fromEntries(dtf.formatToParts(approx).map(p => [p.type, p.value]));
+        const asTzUtc = new Date(Date.UTC(
+          parseInt(approxParts.year, 10),
+          parseInt(approxParts.month, 10) - 1,
+          parseInt(approxParts.day, 10),
+          parseInt(approxParts.hour, 10) % 24,
+          parseInt(approxParts.minute, 10),
+          parseInt(approxParts.second, 10)
+        ));
+        const offsetMs = asTzUtc.getTime() - approx.getTime();
+        resetAtMs = approx.getTime() - offsetMs;
+      } catch (e) {
+        console.error('Timezone parse error in parseRateLimitNotice:', e);
+        const target = new Date(now);
+        target.setHours(hours, mins, 0, 0);
+        if (target.getTime() < now.getTime() - 120000) target.setDate(target.getDate() + 1);
+        resetAtMs = target.getTime();
+      }
+    } else if (isExplicitLimitNotice) {
+      // Direct explicit limit statement without parsable reset time: default to 1 hour
       resetAtMs = now.getTime() + 3600000;
+    } else {
+      // Merely mentions limit words in normal discussion without a time or explicit notice
+      return null;
     }
   }
 
@@ -794,7 +1023,7 @@ function scanAgents() {
       const pid = meta.pid || null;
       const isProcessAlive = pid ? isPidAlive(pid) : false;
       const sessionName = meta.name || s.sessionId.slice(0, 8);
-      const cwd = meta.cwd || (s.projectFolder ? s.projectFolder.replace(/^c--/, 'C:\\').replace(/-/g, '\\') : '');
+      const cwd = meta.cwd || reconstructCwdFromProjectFolder(s.projectFolder);
       if (isSentinelPathOrFolder(cwd, s.projectFolder)) {
         continue;
       }
@@ -881,7 +1110,21 @@ function scanAgents() {
 
       const features = getAgentEffectiveFeatures(agent.sessionId);
 
-      // Check for rate limit notices in latestAssistantText or recent assistant turns relative to turn occurrence time
+      // 1. Check structured API error fields first (zero regex — language & format agnostic)
+      let structuredLimitTurn = null;
+      if (s.turns && s.turns.length > 0) {
+        for (let i = s.turns.length - 1; i >= Math.max(0, s.turns.length - 5); i--) {
+          const t = s.turns[i];
+          const apiErr = extractStructuredApiError(t);
+          if (apiErr && classifyApiError(apiErr.code, apiErr.status) === 'rate_limit') {
+            structuredLimitTurn = t;
+            break;
+          }
+        }
+      }
+
+      // 2. Parse rate limit notice: text parsing is used as the fallback/separator to extract the reset timestamp
+      // (Claude Code stamps human-readable prose "resets HH:MM (Zone)" into text; this is documented as brittle)
       let detectedLimit = parseRateLimitNotice(latestAssistantText, new Date(latestAssistantTimestamp));
       if (!detectedLimit && s.turns && s.turns.length > 0) {
         for (let i = s.turns.length - 1; i >= Math.max(0, s.turns.length - 5); i--) {
@@ -891,6 +1134,18 @@ function scanAgents() {
           const l = parseRateLimitNotice(textCandidate, new Date(turnTime));
           if (l) { detectedLimit = l; break; }
         }
+      }
+
+      // If structured 429 rate limit was stamped but text lacked a parsable reset time, default to 1-hour session limit
+      if (structuredLimitTurn && !detectedLimit) {
+        const turnTime = structuredLimitTurn.timestamp ? new Date(structuredLimitTurn.timestamp).getTime() : (agent.messageTimeMs || now);
+        detectedLimit = {
+          kind: 'session_limit',
+          rawNotice: 'Structured API Error: rate_limit (HTTP 429)',
+          resetAtMs: turnTime + 3600000,
+          resetAtIso: new Date(turnTime + 3600000).toISOString(),
+          timeUntilMinutes: 60
+        };
       }
 
       if (detectedLimit) {
@@ -1006,31 +1261,47 @@ function scanAgents() {
       agent.needsEvaluation = (agent.lastEvaluatedSignature !== agent.activitySignature);
     }
 
-    if (state.hibernation.pending && state.hibernation.targetTimestamp && now >= state.hibernation.targetTimestamp) {
-      state.hibernation.pending = false;
-      state.hibernation.triggerType = null;
-      state.hibernation.reason = null;
-      state.hibernation.targetTimestamp = null;
-      state.hibernation.timer = null;
-    }
-
     state.stats.totalScanned = state.agents.size;
     state.stats.activeRunning = activeCount;
     state.stats.limited = limitedCount;
     state.lastScanAt = new Date().toISOString();
 
-    // Check for Hibernate on All Agents Completed (only if armed while agents were active)
-    if (config.hibernateOnAllCompleted && state.hibernateOnAllCompletedArmed) {
-      if (activeCount === 0 && !state.hibernation.pending && !config.globalPaused) {
-        if (!state.allAgentsCompletedSince) {
-          state.allAgentsCompletedSince = now;
-        } else if (now - state.allAgentsCompletedSince >= 90000) {
-          state.hibernateOnAllCompletedArmed = false;
+    // Check for Hibernate on All Agents Completed
+    if (config.hibernateOnAllCompleted) {
+      if (!state.hibernateOnAllCompletedArmed && (activeCount > 0 || limitedCount > 0)) {
+        state.hibernateOnAllCompletedArmed = true;
+        addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: Watchdog armed (monitoring ${activeCount} active, ${limitedCount} limited agent(s))`);
+        broadcastSSE('hibernation_status', {
+          pending: false,
+          armed: true
+        });
+      }
+
+      if (state.hibernateOnAllCompletedArmed) {
+        if (activeCount === 0 && limitedCount === 0 && !state.hibernation.pending && !config.globalPaused) {
+          if (!state.allAgentsCompletedSince) {
+            state.allAgentsCompletedSince = now;
+            addEvent('INFO', null, 'SYSTEM', `💤 All agents completed tasks and no limits pending. Settling for 90s before initiating hibernation...`);
+            broadcastSSE('hibernation_status', {
+              pending: false,
+              settling: true,
+              settlingSeconds: 90
+            });
+          } else if (now - state.allAgentsCompletedSince >= 90000) {
+            state.hibernateOnAllCompletedArmed = false;
+            state.allAgentsCompletedSince = null;
+            triggerHibernationSequence('All active Claude Code agents have completed their tasks', 'all_completed');
+          }
+        } else {
+          if (state.allAgentsCompletedSince) {
+            addEvent('INFO', null, 'SYSTEM', `Agent activity or pending rate limit detected during settling window. Hibernation timer reset.`);
+            broadcastSSE('hibernation_status', {
+              pending: false,
+              settling: false
+            });
+          }
           state.allAgentsCompletedSince = null;
-          triggerHibernationSequence('All active Claude Code agents have completed their tasks', 'all_completed');
         }
-      } else {
-        state.allAgentsCompletedSince = null;
       }
     } else {
       state.allAgentsCompletedSince = null;
@@ -1084,12 +1355,25 @@ function dispatchPromptToAgent(agent, actionType = 'AUTO_CONTINUE', promptText =
     verificationDetails: null,
   };
   state.resumes.unshift(resumeRecord);
+  if (state.resumes.length > 100) state.resumes.pop();
+  savePersistedResumes();
 
   try {
     if (!fs.existsSync(AM_QUEUE_DIR)) fs.mkdirSync(AM_QUEUE_DIR, { recursive: true });
     const qFile = path.join(AM_QUEUE_DIR, `${agent.sessionId}.json`);
     fs.writeFileSync(qFile, JSON.stringify({ reason: promptText, action: actionType, createdAt: nowMs }), 'utf8');
   } catch (e) {}
+
+  // CRITICAL SAFETY GUARD:
+  // If the agent process is already alive (running in user's terminal/editor), DO NOT spawn a duplicate
+  // headless CLAUDE_BIN process! Doing so creates an unwanted secondary peer session (e.g. preceptor-a3),
+  // causes file lock/transcript conflicts, and aborts background tasks.
+  if (agent.isProcessAlive) {
+    addEvent('INFO', agent.sessionId, agent.name, `Agent process (PID ${agent.pid || 'alive'}) is already active. Queued prompt without spawning duplicate peer session.`);
+    agent.status = 'VERIFYING';
+    startVerificationLoop(agent, resumeRecord, nowMs);
+    return;
+  }
 
   const targetCwd = agent.cwd && fs.existsSync(agent.cwd) ? agent.cwd : HOME;
   const args = ['--output-format', 'stream-json', '--verbose', '--permission-mode', 'auto', '--resume', agent.sessionId];
@@ -1098,11 +1382,13 @@ function dispatchPromptToAgent(agent, actionType = 'AUTO_CONTINUE', promptText =
   try {
     const env = { ...process.env };
     delete env.ANTHROPIC_API_KEY;
+    const isWindowsBatch = process.platform === 'win32' && (CLAUDE_BIN.endsWith('.cmd') || CLAUDE_BIN.endsWith('.bat'));
     child = spawn(CLAUDE_BIN, args, {
       cwd: targetCwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true
+      windowsHide: true,
+      shell: isWindowsBatch
     });
     if (child.stdin) {
       child.stdin.write(promptText);
@@ -1112,6 +1398,7 @@ function dispatchPromptToAgent(agent, actionType = 'AUTO_CONTINUE', promptText =
       console.error('Failed to spawn Claude process:', err);
       resumeRecord.status = 'FAILED';
       resumeRecord.error = err.message;
+      savePersistedResumes();
       addEvent('VERIFY_FAILED', agent.sessionId, agent.name, `Failed to spawn process: ${err.message}`);
     });
     let stderrBuf = '';
@@ -1122,12 +1409,14 @@ function dispatchPromptToAgent(agent, actionType = 'AUTO_CONTINUE', promptText =
       if (code !== 0 && code !== null) {
         console.warn(`Claude process exited with code ${code}: ${stderrBuf.slice(0, 300)}`);
         resumeRecord.error = stderrBuf || `Process exited with code ${code}`;
+        savePersistedResumes();
       }
     });
   } catch (err) {
     agent.status = 'IDLE';
     resumeRecord.status = 'FAILED';
     resumeRecord.error = err.message;
+    savePersistedResumes();
     addEvent('VERIFY_FAILED', agent.sessionId, agent.name, `Failed to dispatch action: ${err.message}`);
     return;
   }
@@ -1186,6 +1475,7 @@ function startVerificationLoop(agent, resumeRecord, startMs) {
           resumeRecord.status = 'VERIFIED_WORKING';
           resumeRecord.verifiedAt = new Date().toISOString();
           resumeRecord.verificationDetails = agent.verification;
+          savePersistedResumes();
 
           state.stats.resumedAndVerified++;
           addEvent('VERIFIED_WORKING', agent.sessionId, agent.name, `Agent verified running! Responded in ${(elapsed/1000).toFixed(1)}s (+${stats.size - initialSize}B)`, agent.verification);
@@ -1200,6 +1490,7 @@ function startVerificationLoop(agent, resumeRecord, startMs) {
       if (agent.status === 'VERIFYING') {
         agent.status = 'IDLE';
         resumeRecord.status = 'TIMEOUT_UNVERIFIED';
+        savePersistedResumes();
         addEvent('VERIFY_FAILED', agent.sessionId, agent.name, `Verification timed out after ${config.verificationTimeoutSeconds || 60}s`);
         broadcastSSE('status', getSanitizedStatus());
       }
@@ -1322,6 +1613,22 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    if (pathname === '/api/events/clear' && req.method === 'POST') {
+      try {
+        state.events = [];
+        if (fs.existsSync(EVENTS_FILE)) {
+          fs.writeFileSync(EVENTS_FILE, '', 'utf8');
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, message: 'Audit stream cleared' }));
+        addEvent('INFO', null, 'SYSTEM', 'Audit log history cleared by user.');
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+      return;
+    }
+
     // POST /api/pause (Toggle Global Pause)
     if (pathname === '/api/pause' && req.method === 'POST') {
       let body = '';
@@ -1368,18 +1675,23 @@ const server = http.createServer((req, res) => {
 
             config = { ...config, ...updates };
 
+            if (updates.auditRetentionDays !== undefined) {
+              pruneEventsFile();
+              savePersistedResumes();
+            }
+
             // Handle arming logic for Hibernate on All Completed
             if (willHibernateOnAllBeEnabled && !wasHibernateOnAllEnabled) {
-              const currentActiveCount = Array.from(state.agents.values()).filter(a =>
-                a.enabled && (a.status === 'ACTIVE' || a.status === 'RESUMING' || a.status === 'VERIFYING' || a.status === 'AUTO_FIXING' || a.status === 'AUTO_IMPROVING')
+              const currentInFlightCount = Array.from(state.agents.values()).filter(a =>
+                a.enabled && (a.status === 'ACTIVE' || a.status === 'LIMITED' || a.status === 'RESUMING' || a.status === 'VERIFYING' || a.status === 'AUTO_FIXING' || a.status === 'AUTO_IMPROVING')
               ).length;
 
-              if (currentActiveCount > 0) {
+              if (currentInFlightCount > 0) {
                 state.hibernateOnAllCompletedArmed = true;
-                addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: ARMED (monitoring ${currentActiveCount} active agent${currentActiveCount > 1 ? 's' : ''})`);
+                addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: ARMED (monitoring ${currentInFlightCount} in-flight/pending agent${currentInFlightCount > 1 ? 's' : ''})`);
               } else {
                 state.hibernateOnAllCompletedArmed = false;
-                addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: Enabled, but no agents were currently active. Arming requires an agent to be active when enabled.`);
+                addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: Enabled. Watchdog will arm automatically as soon as in-flight/pending agents are detected.`);
               }
             } else if (!willHibernateOnAllBeEnabled && wasHibernateOnAllEnabled) {
               state.hibernateOnAllCompletedArmed = false;
@@ -1761,7 +2073,34 @@ function startServer(targetPort, maxAttempts = 10) {
     setInterval(() => {
       scanAgents();
     }, 3000);
+
+    // Prune audit logs and resumes older than auditRetentionDays once every 24 hours
+    setInterval(() => {
+      pruneEventsFile();
+      savePersistedResumes();
+    }, 24 * 3600 * 1000);
   });
 }
 
-startServer(PORT);
+module.exports = {
+  server,
+  TZ_MAP,
+  DAY_MAP,
+  EVENTS_FILE,
+  RESUMES_FILE,
+  extractIanaZone,
+  classifyApiError,
+  extractStructuredApiError,
+  parseRateLimitNotice,
+  reconstructCwdFromProjectFolder,
+  isSentinelPathOrFolder,
+  loadPersistedEvents,
+  pruneEventsFile,
+  loadPersistedResumes,
+  savePersistedResumes,
+  startServer
+};
+
+if (require.main === module) {
+  startServer(PORT);
+}

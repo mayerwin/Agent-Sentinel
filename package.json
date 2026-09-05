@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "supervise": "node tools/supervise-cli.js"
+    "supervise": "node tools/supervise-cli.js",
+    "test": "node test/test_suite.js"
   },
   "keywords": [
     "claude-code",

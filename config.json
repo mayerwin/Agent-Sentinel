@@ -1,6 +1,6 @@
 {
   "globalPaused": false,
-  "lookbackHours": 6,
+  "lookbackHours": 24,
   "recheckIntervalSeconds": 120,
   "hibernateOnWeeklyLimit": false,
   "hibernateOnAllCompleted": false,
@@ -10,6 +10,7 @@
   "defaultAutoImprove": false,
   "authorizeSubagents": true,
   "verificationTimeoutSeconds": 60,
+  "auditRetentionDays": 30,
   "disabledSessionIds": [],
   "agentOverrides": {}
 }
