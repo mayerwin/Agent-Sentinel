@@ -435,13 +435,44 @@ function renderDashboard(status) {
   const limited = (status.agents || []).filter(a => a.status === 'LIMITED' && a.enabled && !status.config?.globalPaused);
   if (limited.length > 0) {
     limitHeroSection.style.display = 'block';
-    limitAgentStrip.innerHTML = limited.map(a => `
-      <div class="limited-pill">
-        <span>⚠️ ${escapeHtml(a.name)}</span>
-        <span>•</span>
-        <span>${a.limitNotice?.kind === 'weekly_limit' ? 'Weekly Limit' : 'Session Limit'}</span>
-      </div>
-    `).join('');
+
+    const hasWeekly = limited.some(a => a.limitNotice?.kind === 'weekly_limit');
+    const hasSession = limited.some(a => a.limitNotice?.kind !== 'weekly_limit');
+
+    const heroTitle = document.getElementById('limitHeroTitle');
+    const heroDesc = document.getElementById('limitHeroDesc');
+
+    if (heroTitle && heroDesc) {
+      if (hasWeekly && !hasSession) {
+        heroTitle.textContent = limited.length === 1
+          ? 'Weekly Quota Limit Detected'
+          : 'Weekly Quota Limits Detected';
+        heroDesc.textContent = limited.length === 1
+          ? 'An agent reached its weekly token quota limit. Standing by to automatically dispatch "continue" when the reset arrives.'
+          : 'Agents reached their weekly token quota limit. Standing by to automatically dispatch "continue" when the reset arrives.';
+      } else if (hasSession && !hasWeekly) {
+        heroTitle.textContent = limited.length === 1
+          ? 'Session Rate Limit Detected'
+          : 'Session Rate Limits Detected';
+        heroDesc.textContent = limited.length === 1
+          ? 'An agent reached its 5-hour session token limit. Standing by to automatically dispatch "continue" when the reset arrives.'
+          : 'Agents reached their 5-hour session token limit. Standing by to automatically dispatch "continue" when the reset arrives.';
+      } else {
+        heroTitle.textContent = 'Session & Weekly Limits Detected';
+        heroDesc.textContent = 'Agents reached session and weekly token limits. Standing by to automatically dispatch "continue" when their respective resets arrive.';
+      }
+    }
+
+    limitAgentStrip.innerHTML = limited.map(a => {
+      const isWeekly = a.limitNotice?.kind === 'weekly_limit';
+      return `
+        <div class="limited-pill ${isWeekly ? 'weekly-pill' : 'session-pill'}">
+          <span>⚠️ ${escapeHtml(a.name)}</span>
+          <span>•</span>
+          <span style="font-weight: 600;">${isWeekly ? 'Weekly Limit' : 'Session Limit (5-hr)'}</span>
+        </div>
+      `;
+    }).join('');
   } else {
     limitHeroSection.style.display = 'none';
   }

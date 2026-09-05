@@ -470,6 +470,17 @@ input:checked + .slider:before {
   display: flex;
   align-items: center;
   gap: 8px;
+  transition: all 0.2s ease;
+}
+.limited-pill.session-pill {
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+}
+.limited-pill.weekly-pill {
+  background: rgba(239, 68, 68, 0.18);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  color: #f87171;
 }
 
 /* Split Content */

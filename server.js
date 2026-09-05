@@ -387,14 +387,14 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
     const turn = turns[i];
     const content = turn.message?.content;
 
-    // Check for task notification (completion)
+    // Check for task notification (completion, failure, or cancellation from Claude Code runtime)
     const textContent = typeof content === 'string' ? content : JSON.stringify(content || '');
     const notifMatches = textContent.matchAll(/<task-id>([^<]+)<\/task-id>/g);
     for (const nm of notifMatches) {
       finishedTaskIds.add(nm[1]);
     }
 
-    // Check for tool_use with run_in_background
+    // Check for tool_use with run_in_background: true
     if (Array.isArray(content)) {
       for (const block of content) {
         if (block.type === 'tool_use' && block.input?.run_in_background) {
@@ -407,10 +407,13 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
               : JSON.stringify(nextTurn.message?.content || '');
             const idMatch = nextContent.match(/Command running in background with ID:\s*([a-zA-Z0-9_-]+)/);
             if (idMatch) {
+              const turnTimestamp = turn.timestamp ? new Date(turn.timestamp).getTime() : Date.now();
               pendingTaskCandidates.set(idMatch[1], {
                 taskId: idMatch[1],
                 description: desc,
-                command: cmd ? cmd.slice(0, 150) : null
+                command: cmd ? cmd.slice(0, 150) : null,
+                turnIndex: i,
+                turnTimestamp
               });
             }
           }
@@ -419,28 +422,62 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
     }
   }
 
+  const now = Date.now();
+
   for (const [taskId, info] of pendingTaskCandidates) {
+    // 1. Authoritative check: transcript contains <task-notification> for this task
     if (finishedTaskIds.has(taskId)) continue;
 
     const outputFile = path.join(tasksDir, `${taskId}.output`);
+    const fileExists = fs.existsSync(outputFile);
+    const taskAgeMs = now - (info.turnTimestamp || now);
+
+    // 2. If file does not exist: allow a 45s grace period for newly launched tasks
+    if (!fileExists) {
+      if (taskAgeMs < 45000) {
+        activeTasks.push({
+          taskId,
+          description: info.description,
+          command: info.command,
+          outputSize: 0,
+          mtimeMs: info.turnTimestamp,
+          ageMinutes: 0
+        });
+      }
+      continue;
+    }
+
+    // 3. Inspect output file
     let isExited = false;
     let size = 0;
-    let mtimeMs = Date.now();
+    let mtimeMs = now;
 
-    if (fs.existsSync(outputFile)) {
+    try {
       const st = fs.statSync(outputFile);
       size = st.size;
       mtimeMs = st.mtimeMs;
+
+      // 4. Anchored trailing exit marker verification: Claude Code appends '\n\n[exited with code N]\n'
       if (st.size > 0) {
-        const readLen = Math.min(st.size, 512);
+        const readLen = Math.min(st.size, 1024);
         const buf = Buffer.alloc(readLen);
         const fd = fs.openSync(outputFile, 'r');
         fs.readSync(fd, buf, 0, readLen, st.size - readLen);
         fs.closeSync(fd);
-        if (/\[exited with code \d+\]/.test(buf.toString('utf8'))) {
+        const tailText = buf.toString('utf8');
+        if (/(?:^|\r?\n)\[exited with code -?\d+\]\s*$/.test(tailText)) {
           isExited = true;
         }
       }
+
+      // 5. Orphan/Crash Guard: if the file hasn't been modified in > 45 minutes and no exit marker exists,
+      // the process died without cleanup (e.g. killed, rebooted, crash)
+      const fileIdleMinutes = (now - mtimeMs) / 60000;
+      if (!isExited && fileIdleMinutes > 45 && taskAgeMs > 45 * 60000) {
+        isExited = true;
+      }
+    } catch (err) {
+      // In case of read/stat errors, fallback to not exited
     }
 
     if (!isExited) {
@@ -450,7 +487,7 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
         command: info.command,
         outputSize: size,
         mtimeMs,
-        ageMinutes: Math.max(0, Math.round((Date.now() - mtimeMs) / 60000))
+        ageMinutes: Math.max(0, Math.round((now - mtimeMs) / 60000))
       });
     }
   }
