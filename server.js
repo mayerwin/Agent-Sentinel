@@ -365,7 +365,7 @@ function readLastRawTurns(filePath, maxLines = 15, stats = null) {
       return cached.data;
     }
 
-    const bufferSize = Math.min(st.size, 256 * 1024);
+    const bufferSize = Math.min(st.size, 2 * 1024 * 1024);
     const fd = fs.openSync(filePath, 'r');
     const buf = Buffer.alloc(bufferSize);
     fs.readSync(fd, buf, 0, bufferSize, st.size - bufferSize);
