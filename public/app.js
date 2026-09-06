@@ -61,6 +61,13 @@ const inputLookback = document.getElementById('inputLookback');
 const inputRecheck = document.getElementById('inputRecheck');
 const modalToggleHibernate = document.getElementById('modalToggleHibernate');
 const modalToggleHibernateOnCompletion = document.getElementById('modalToggleHibernateOnCompletion');
+const quickToggleHibernate = document.getElementById('quickToggleHibernate');
+const quickToggleHibernateOnCompletion = document.getElementById('quickToggleHibernateOnCompletion');
+const cardToggleWeeklyLimit = document.getElementById('cardToggleWeeklyLimit');
+const cardToggleAllCompleted = document.getElementById('cardToggleAllCompleted');
+const armedWeeklyLimitTag = document.getElementById('armedWeeklyLimitTag');
+const armedOnCompletionTag = document.getElementById('armedOnCompletionTag');
+const powerActiveStatusBadge = document.getElementById('powerActiveStatusBadge');
 const modalToggleAutoContinue = document.getElementById('modalToggleAutoContinue');
 const modalToggleAutoFix = document.getElementById('modalToggleAutoFix');
 const modalToggleAutoImprove = document.getElementById('modalToggleAutoImprove');
@@ -228,8 +235,8 @@ function syncSettingsToModal(cfg) {
   if (!cfg) return;
   if (cfg.lookbackHours) inputLookback.value = cfg.lookbackHours;
   if (cfg.recheckIntervalSeconds) inputRecheck.value = cfg.recheckIntervalSeconds;
-  if (typeof cfg.hibernateOnWeeklyLimit === 'boolean') modalToggleHibernate.checked = cfg.hibernateOnWeeklyLimit;
-  if (typeof cfg.hibernateOnAllCompleted === 'boolean') modalToggleHibernateOnCompletion.checked = cfg.hibernateOnAllCompleted;
+  if (modalToggleHibernate && typeof cfg.hibernateOnWeeklyLimit === 'boolean') modalToggleHibernate.checked = cfg.hibernateOnWeeklyLimit;
+  if (modalToggleHibernateOnCompletion && typeof cfg.hibernateOnAllCompleted === 'boolean') modalToggleHibernateOnCompletion.checked = cfg.hibernateOnAllCompleted;
   if (typeof cfg.defaultAutoContinue === 'boolean') {
     modalToggleAutoContinue.checked = cfg.defaultAutoContinue;
   } else if (typeof cfg.autoResumeEnabled === 'boolean') {
@@ -470,6 +477,41 @@ function renderDashboard(status) {
 
   if (status.config && (!settingsModal || settingsModal.style.display === 'none' || settingsModal.style.display === '')) {
     syncSettingsToModal(status.config);
+  }
+
+  // Synchronize Quick Power Automation Controls
+  if (status.config) {
+    const weeklyActive = !!status.config.hibernateOnWeeklyLimit;
+    const allCompActive = !!status.config.hibernateOnAllCompleted;
+
+    if (quickToggleHibernate) {
+      quickToggleHibernate.checked = weeklyActive;
+    }
+    if (quickToggleHibernateOnCompletion) {
+      quickToggleHibernateOnCompletion.checked = allCompActive;
+    }
+    if (cardToggleWeeklyLimit) {
+      cardToggleWeeklyLimit.classList.toggle('active', weeklyActive);
+    }
+    if (cardToggleAllCompleted) {
+      cardToggleAllCompleted.classList.toggle('active', allCompActive);
+    }
+    if (armedWeeklyLimitTag) {
+      armedWeeklyLimitTag.style.display = weeklyActive ? 'inline-block' : 'none';
+    }
+    if (armedOnCompletionTag) {
+      const isArmed = allCompActive && (status.settling || status.hibernateOnAllCompletedArmed || (status.stats?.activeRunning > 0));
+      armedOnCompletionTag.style.display = isArmed ? 'inline-block' : 'none';
+    }
+    if (powerActiveStatusBadge) {
+      if (weeklyActive || allCompActive) {
+        powerActiveStatusBadge.textContent = 'AUTOMATION ACTIVE';
+        powerActiveStatusBadge.className = 'power-bar-badge active-armed';
+      } else {
+        powerActiveStatusBadge.textContent = 'OFF';
+        powerActiveStatusBadge.className = 'power-bar-badge';
+      }
+    }
   }
 
   handleHibernationBanner(status.hibernation);
@@ -866,8 +908,8 @@ async function shutdownServer() {
 async function saveSettingsFromModal() {
   const lookbackHours = parseInt(inputLookback.value, 10) || 24;
   const recheckIntervalSeconds = parseInt(inputRecheck.value, 10) || 120;
-  const hibernateOnWeeklyLimit = modalToggleHibernate.checked;
-  const hibernateOnAllCompleted = modalToggleHibernateOnCompletion.checked;
+  const hibernateOnWeeklyLimit = modalToggleHibernate ? modalToggleHibernate.checked : (quickToggleHibernate ? quickToggleHibernate.checked : false);
+  const hibernateOnAllCompleted = modalToggleHibernateOnCompletion ? modalToggleHibernateOnCompletion.checked : (quickToggleHibernateOnCompletion ? quickToggleHibernateOnCompletion.checked : false);
   const defaultAutoContinue = modalToggleAutoContinue.checked;
   const defaultAutoFix = modalToggleAutoFix.checked;
   const defaultAutoImprove = modalToggleAutoImprove.checked;
@@ -1289,6 +1331,66 @@ if (settingsModal) {
 
 if (btnCancelHibernate) {
   btnCancelHibernate.addEventListener('click', cancelHibernateAction);
+}
+
+// Quick Hibernation Controls
+async function updateQuickHibernateSettings(updates) {
+  if (isDemo) {
+    showToast('Hibernate setting updated (demo mode)', '💤');
+    if (currentStatus && currentStatus.config) {
+      currentStatus.config = { ...currentStatus.config, ...updates };
+      renderDashboard(currentStatus);
+    }
+    return;
+  }
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    });
+    const data = await res.json();
+    if (data.ok) {
+      if (updates.hibernateOnWeeklyLimit !== undefined) {
+        showToast(`Hibernate on Weekly Limit: ${updates.hibernateOnWeeklyLimit ? 'ARMED 💤' : 'Disarmed'}`, updates.hibernateOnWeeklyLimit ? '💤' : 'ℹ️');
+      }
+      if (updates.hibernateOnAllCompleted !== undefined) {
+        showToast(`Hibernate on Completion: ${updates.hibernateOnAllCompleted ? 'ARMED 💤' : 'Disarmed'}`, updates.hibernateOnAllCompleted ? '💤' : 'ℹ️');
+      }
+      fetchStatus();
+    } else {
+      showToast(`Failed to update setting: ${data.error}`, '❌');
+    }
+  } catch (e) {
+    showToast(`Error updating setting: ${e.message}`, '❌');
+  }
+}
+
+if (quickToggleHibernate) {
+  quickToggleHibernate.addEventListener('change', () => {
+    updateQuickHibernateSettings({ hibernateOnWeeklyLimit: quickToggleHibernate.checked });
+  });
+}
+if (quickToggleHibernateOnCompletion) {
+  quickToggleHibernateOnCompletion.addEventListener('change', () => {
+    updateQuickHibernateSettings({ hibernateOnAllCompleted: quickToggleHibernateOnCompletion.checked });
+  });
+}
+if (cardToggleWeeklyLimit) {
+  cardToggleWeeklyLimit.addEventListener('click', (e) => {
+    if (!e.target.closest('.switch') && quickToggleHibernate) {
+      quickToggleHibernate.checked = !quickToggleHibernate.checked;
+      quickToggleHibernate.dispatchEvent(new Event('change'));
+    }
+  });
+}
+if (cardToggleAllCompleted) {
+  cardToggleAllCompleted.addEventListener('click', (e) => {
+    if (!e.target.closest('.switch') && quickToggleHibernateOnCompletion) {
+      quickToggleHibernateOnCompletion.checked = !quickToggleHibernateOnCompletion.checked;
+      quickToggleHibernateOnCompletion.dispatchEvent(new Event('change'));
+    }
+  });
 }
 
 if (btnScanNow) {

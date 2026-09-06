@@ -748,9 +748,17 @@ function extractIanaZone(text) {
 function parseRateLimitNotice(text, now = new Date()) {
   if (!text || typeof text !== 'string') return null;
 
+  // 1. Explicitly ignore conversational context compaction / continuation notices (never a rate limit)
+  if (/ran out of context|continued from a previous conversation|compacted conversation|context window/i.test(text)) {
+    return null;
+  }
+
   const isWeeklyLimit = /weekly (?:usage )?limit|weekly quota/i.test(text);
-  const isExplicitLimitNotice = /(?:reached|hit|exceeded) (?:your )?(?:usage|session|weekly|rate) limit/i.test(text);
-  const hasTimeIndicator = /(?:resets?|try again|available again|available|wait until|retry)\s+(?:at\s+|in\s+)?/i.test(text);
+  const isExplicitLimitNotice = /(?:reached|hit|exceeded) (?:your )?(?:usage|session|weekly|rate) limit/i.test(text) ||
+    /rate limit exceeded/i.test(text) ||
+    /API usage capped/i.test(text) ||
+    /(?:usage|session|rate) limit reached/i.test(text);
+  const hasTimeIndicator = /(?:resets?|try again|available again)\s+(?:at\s+|in\s+)?/i.test(text);
 
   // If not an explicit limit statement and lacks any time indicator, ignore
   if (!isExplicitLimitNotice && !isWeeklyLimit && !hasTimeIndicator && !/resets?\s+(?:at\s+)?\d+/i.test(text)) {
@@ -761,14 +769,14 @@ function parseRateLimitNotice(text, now = new Date()) {
   let resetAtMs = null;
 
   // 1. Check relative intervals first (e.g. "try again in 45 minutes", "resets in 2 hours")
-  const relMatch = text.match(/(?:resets?|try again|available again|available|wait until|wait|retry)?\s*(?:in|after)\s+(\d+)\s*(m|min|mins|minutes?|h|hr|hrs|hours?)/i);
+  const relMatch = text.match(/(?:resets?|try again|available again)?\s*(?:in|after)\s+(\d+)\s*(m|min|mins|minutes?|h|hr|hrs|hours?)/i);
   if (relMatch) {
     const val = parseInt(relMatch[1], 10);
     const isHours = /h/i.test(relMatch[2]);
     resetAtMs = now.getTime() + (isHours ? val * 3600000 : val * 60000);
   } else {
     // 2. Check absolute time with specific weekday regex (prevents words like "in" from being treated as days)
-    const timeMatch = text.match(/(?:resets?|try again|available again|available|wait until|retry)\s+(?:at\s+)?(?:(Sun(?:day)?|Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:r(?:sday)?)?|Fri(?:day)?|Sat(?:urday)?)\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i);
+    const timeMatch = text.match(/(?:resets?|try again|available again)\s+(?:at\s+)?(?:(Sun(?:day)?|Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:r(?:sday)?)?|Fri(?:day)?|Sat(?:urday)?)\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i);
     if (timeMatch) {
       const [_, dayOfWeek, rawHours, rawMins, ampm, parenTz, suffixTz] = timeMatch;
       let hours = parseInt(rawHours, 10);
@@ -1131,6 +1139,9 @@ function scanAgents() {
           const t = s.turns[i];
           const turnTime = t.timestamp ? new Date(t.timestamp).getTime() : (agent.messageTimeMs || now);
           const textCandidate = t.message?.content ? (typeof t.message.content === 'string' ? t.message.content : JSON.stringify(t.message.content)) : '';
+          if (/ran out of context|continued from a previous conversation/i.test(textCandidate)) {
+            continue;
+          }
           const l = parseRateLimitNotice(textCandidate, new Date(turnTime));
           if (l) { detectedLimit = l; break; }
         }
@@ -1222,7 +1233,7 @@ function scanAgents() {
 
         if (agent.llmEvaluation && !agent.needsEvaluation) {
           const evalAgeMs = agent.llmEvaluation.evaluatedAt ? (now - new Date(agent.llmEvaluation.evaluatedAt).getTime()) : 0;
-          if (!isProcessAlive || (!hasActiveWork && (agent.ageMinutes > 5 || evalAgeMs > 300000))) {
+          if (!isProcessAlive || (!hasActiveWork && evalAgeMs > 300000)) {
             agent.status = 'IDLE';
           } else {
             agent.status = agent.llmEvaluation.status || baselineStatus;
@@ -1672,6 +1683,10 @@ const server = http.createServer((req, res) => {
             const willHibernateOnAllBeEnabled = updates.hibernateOnAllCompleted !== undefined
               ? !!updates.hibernateOnAllCompleted
               : wasHibernateOnAllEnabled;
+            const wasHibernateOnWeeklyEnabled = !!config.hibernateOnWeeklyLimit;
+            const willHibernateOnWeeklyBeEnabled = updates.hibernateOnWeeklyLimit !== undefined
+              ? !!updates.hibernateOnWeeklyLimit
+              : wasHibernateOnWeeklyEnabled;
 
             config = { ...config, ...updates };
 
@@ -1680,30 +1695,46 @@ const server = http.createServer((req, res) => {
               savePersistedResumes();
             }
 
-            // Handle arming logic for Hibernate on All Completed
-            if (willHibernateOnAllBeEnabled && !wasHibernateOnAllEnabled) {
-              const currentInFlightCount = Array.from(state.agents.values()).filter(a =>
-                a.enabled && (a.status === 'ACTIVE' || a.status === 'LIMITED' || a.status === 'RESUMING' || a.status === 'VERIFYING' || a.status === 'AUTO_FIXING' || a.status === 'AUTO_IMPROVING')
-              ).length;
+            // Handle arming logic for Hibernate on Weekly Limit
+            if (updates.hibernateOnWeeklyLimit !== undefined && willHibernateOnWeeklyBeEnabled !== wasHibernateOnWeeklyEnabled) {
+              if (willHibernateOnWeeklyBeEnabled) {
+                addEvent('INFO', null, 'SYSTEM', '💤 Hibernate on Weekly Limit: ARMED');
+              } else {
+                addEvent('INFO', null, 'SYSTEM', '💤 Hibernate on Weekly Limit: Disarmed.');
+              }
+            }
 
-              if (currentInFlightCount > 0) {
+            // Handle arming logic for Hibernate on All Completed
+            if (updates.hibernateOnAllCompleted !== undefined && willHibernateOnAllBeEnabled !== wasHibernateOnAllEnabled) {
+              if (willHibernateOnAllBeEnabled) {
+                const currentInFlightCount = Array.from(state.agents.values()).filter(a =>
+                  a.enabled && (a.status === 'ACTIVE' || a.status === 'LIMITED' || a.status === 'RESUMING' || a.status === 'VERIFYING' || a.status === 'AUTO_FIXING' || a.status === 'AUTO_IMPROVING')
+                ).length;
+
                 state.hibernateOnAllCompletedArmed = true;
-                addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: ARMED (monitoring ${currentInFlightCount} in-flight/pending agent${currentInFlightCount > 1 ? 's' : ''})`);
+                if (currentInFlightCount > 0) {
+                  addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: ARMED (monitoring ${currentInFlightCount} in-flight agent${currentInFlightCount > 1 ? 's' : ''})`);
+                } else {
+                  addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: ARMED (watching for in-flight tasks)`);
+                }
               } else {
                 state.hibernateOnAllCompletedArmed = false;
-                addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: Enabled. Watchdog will arm automatically as soon as in-flight/pending agents are detected.`);
+                state.allAgentsCompletedSince = null;
+                if (state.hibernation.pending && state.hibernation.triggerType === 'all_completed') {
+                  cancelHibernation();
+                }
+                addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: Disarmed.`);
               }
-            } else if (!willHibernateOnAllBeEnabled && wasHibernateOnAllEnabled) {
-              state.hibernateOnAllCompletedArmed = false;
-              state.allAgentsCompletedSince = null;
-              if (state.hibernation.pending && state.hibernation.triggerType === 'all_completed') {
-                cancelHibernation();
-              }
-              addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: Disarmed.`);
             }
 
             saveConfig();
-            addEvent('INFO', null, 'SYSTEM', 'Configuration updated', { config });
+
+            // Only log generic settings update when non-power settings were modified
+            const nonPowerKeys = Object.keys(updates).filter(k => k !== 'hibernateOnWeeklyLimit' && k !== 'hibernateOnAllCompleted');
+            if (nonPowerKeys.length > 0) {
+              addEvent('INFO', null, 'SYSTEM', `Configuration updated (${nonPowerKeys.join(', ')})`, { updates });
+            }
+
             scanAgents();
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true, config, armedOnCompletion: state.hibernateOnAllCompletedArmed }));

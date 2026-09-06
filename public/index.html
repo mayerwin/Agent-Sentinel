@@ -184,6 +184,50 @@
             </div>
           </div>
 
+          <!-- PC Power Management Quick Controls -->
+          <div class="power-quick-bar" id="powerQuickBar">
+            <div class="power-bar-header">
+              <div class="power-bar-title-wrap">
+                <span class="power-bar-icon">⚡</span>
+                <span class="power-bar-title">PC Power Automation</span>
+              </div>
+              <span class="power-bar-badge" id="powerActiveStatusBadge">IDLE</span>
+            </div>
+            <div class="power-toggles-grid">
+              <!-- Toggle 1: Hibernate on Weekly Limit -->
+              <div class="power-toggle-card" id="cardToggleWeeklyLimit">
+                <div class="power-toggle-info">
+                  <div class="power-toggle-title">
+                    <span class="power-toggle-icon">💤</span>
+                    <span>Hibernate on Weekly Limit</span>
+                    <span class="power-armed-tag" id="armedWeeklyLimitTag" style="display:none;">ARMED</span>
+                  </div>
+                  <div class="power-toggle-desc">Puts PC to sleep (30s countdown) when any agent exhausts weekly quota</div>
+                </div>
+                <label class="switch power-switch" title="Toggle automatic PC hibernation on weekly quota limit">
+                  <input type="checkbox" id="quickToggleHibernate">
+                  <span class="slider round"></span>
+                </label>
+              </div>
+
+              <!-- Toggle 2: Hibernate on Completion of All Agents -->
+              <div class="power-toggle-card" id="cardToggleAllCompleted">
+                <div class="power-toggle-info">
+                  <div class="power-toggle-title">
+                    <span class="power-toggle-icon">💤</span>
+                    <span>Hibernate on All Completed</span>
+                    <span class="power-armed-tag" id="armedOnCompletionTag" style="display:none;">ARMED</span>
+                  </div>
+                  <div class="power-toggle-desc">Puts PC to sleep when all active agent tasks finish cleanly</div>
+                </div>
+                <label class="switch power-switch" title="Toggle automatic PC hibernation when all active agents complete">
+                  <input type="checkbox" id="quickToggleHibernateOnCompletion">
+                  <span class="slider round"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+
           <div class="agents-grid" id="agentsContainer">
             <div class="empty-state" id="agentsEmptyState">
               <div class="spinner"></div>
@@ -255,30 +299,6 @@
               <input type="number" id="inputAuditRetention" min="1" max="365" value="30" class="setting-number-input">
               <span class="input-suffix">days</span>
             </div>
-          </div>
-
-          <!-- Hibernate on Weekly Limit -->
-          <div class="setting-item">
-            <div class="setting-info">
-              <span class="setting-title">Hibernate PC on Weekly Limit</span>
-              <span class="setting-desc">Execute <code>shutdown /h</code> after a 30s grace period when weekly limit is reached.</span>
-            </div>
-            <label class="switch">
-              <input type="checkbox" id="modalToggleHibernate">
-              <span class="slider round"></span>
-            </label>
-          </div>
-
-          <!-- Hibernate PC on Completion of All Agents -->
-          <div class="setting-item">
-            <div class="setting-info">
-              <span class="setting-title">Hibernate PC on Completion of All Agents</span>
-              <span class="setting-desc">Execute <code>shutdown /h</code> after a 30s grace period when all active agents finish. Only triggers if an agent was active when enabled.</span>
-            </div>
-            <label class="switch">
-              <input type="checkbox" id="modalToggleHibernateOnCompletion">
-              <span class="slider round"></span>
-            </label>
           </div>
 
           <!-- Default Auto-Continue on Rate Limit -->

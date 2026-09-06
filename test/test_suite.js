@@ -97,7 +97,10 @@ runTest('Negative test: Normal assistant code and conversations should NOT match
     'Usage limit in AWS Lambda can be configured in the serverless.yml file.',
     'Let me check the logs at 12:00 PM to see what happened.',
     'Error: ECONNREFUSED 127.0.0.1:3000',
-    'Running git diff to inspect changes before committing.'
+    'Running git diff to inspect changes before committing.',
+    'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier conversation.',
+    'This session is being continued from a previous conversation that ran out of context. Technical details: wait until 1000 available at 12:00 PM EST.',
+    'Session compacted conversation due to context window token ceiling.'
   ];
   for (const m of normalMsgs) {
     const res = helpers.parseRateLimitNotice(m);
