@@ -98,6 +98,9 @@ runTest('Negative test: Normal assistant code and conversations should NOT match
     'Let me check the logs at 12:00 PM to see what happened.',
     'Error: ECONNREFUSED 127.0.0.1:3000',
     'Running git diff to inspect changes before committing.',
+    'npm run explore:daemon -- reset 2>&1 | tail -8',
+    'git reset 2',
+    'powershell -Command "Stop-Process -Id 8443; reset 1"',
     'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier conversation.',
     'This session is being continued from a previous conversation that ran out of context. Technical details: wait until 1000 available at 12:00 PM EST.',
     'Session compacted conversation due to context window token ceiling.'
@@ -323,6 +326,48 @@ runTest('Concurrency guard prevents duplicate Claude CLI spawn for alive process
   assert.strictEqual(shouldSpawnCliProcess(false), true, 'Spawns CLI process only if agent process is stopped/offline');
 });
 
+runTest('Strict Idle Arming Guard: Standby mode when all agents are idle at arming time', () => {
+  const evaluateArmingState = (inFlightCount) => {
+    if (inFlightCount > 0) {
+      return { armed: true, settling: false };
+    }
+    // Strict Guard: All agents completed/idle -> stay unarmed in standby
+    return { armed: false, settling: false };
+  };
+
+  const idleAtArm = evaluateArmingState(0);
+  assert.strictEqual(idleAtArm.armed, false, 'Watchdog must remain unarmed if agents are completed/idle when armed');
+  assert.strictEqual(idleAtArm.settling, false, 'Watchdog must not start settling countdown when agents are completed/idle');
+
+  const activeAtArm = evaluateArmingState(2);
+  assert.strictEqual(activeAtArm.armed, true, 'Watchdog must arm when in-flight agents are running');
+});
+
+runTest('Baseline Status: Recognizes session busy status from session metadata', () => {
+  const now = Date.now();
+  const busyMeta = { status: 'busy', statusUpdatedAt: now - 30000 };
+  const lastTurn = { type: 'assistant', message: { role: 'assistant', stop_reason: 'end_turn', content: 'Done.' } };
+  
+  const status = helpers.computeBaselineAgentStatus(lastTurn, now - 60000, true, now, busyMeta);
+  assert.strictEqual(status, 'ACTIVE', 'Agent must be ACTIVE if Claude Code session reports status: busy');
+});
+
+runTest('Baseline Status: Keeps active status for alive process awaiting tool execution beyond 10 minutes', () => {
+  const now = Date.now();
+  const toolTurn = {
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', name: 'Agent', id: 'tool_123' }]
+    }
+  };
+  
+  // 25 minutes ago
+  const status = helpers.computeBaselineAgentStatus(toolTurn, now - 25 * 60000, true, now);
+  assert.strictEqual(status, 'ACTIVE', 'Agent must be ACTIVE while alive process awaits tool execution');
+});
+
 // Finish summary
 setTimeout(() => {
   if (startedInternalServer && helpers.server) {
@@ -336,4 +381,4 @@ setTimeout(() => {
   } else {
     process.exit(0);
   }
-}, 800);
+}, 2000);

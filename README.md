@@ -84,16 +84,20 @@ Configure behavior globally in Settings or override per agent:
 
 ---
 
-### Method B: Standalone Daemon
-1. Clone or navigate to the directory:
-   ```bash
-   cd C:\Users\erwin\Dropbox\Projects\GitHub\Agent-Sentinel
-   ```
-2. Start the Sentinel server (zero external dependencies required):
+### Method B: 1-Click Desktop Shortcut (Zero Terminal / Silent Mode)
+Double-click either launcher in the root folder:
+- **`Launch.vbs`** *(Recommended)*: Starts the server completely hidden in the background (0% console window flash) and automatically opens **[http://localhost:3456](http://localhost:3456)** in your default browser.
+- **`Launch.bat`**: Batch launcher alternative.
+- **`Stop.bat`**: 1-click script to gracefully stop the background daemon.
+
+---
+
+### Method C: Standalone CLI
+1. Open terminal in the directory:
    ```bash
    npm start
    ```
-3. Open your browser to **[http://localhost:3456](http://localhost:3456)** (or **[http://localhost:3456/?demo=true](http://localhost:3456/?demo=true)** for sanitized demo mode).
+2. Open your browser to **[http://localhost:3456](http://localhost:3456)** (or **[http://localhost:3456/?demo=true](http://localhost:3456/?demo=true)** for sanitized demo mode).
 
 ---
 

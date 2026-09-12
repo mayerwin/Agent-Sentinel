@@ -413,11 +413,18 @@ function readLastRawTurns(filePath, maxLines = 15, stats = null) {
   }
 }
 
-function computeBaselineAgentStatus(lastMeaningfulTurn, messageTimeMs, isProcessAlive, now = Date.now()) {
+function computeBaselineAgentStatus(lastMeaningfulTurn, messageTimeMs, isProcessAlive, now = Date.now(), sessionMeta = null) {
   if (!isProcessAlive) return 'IDLE';
 
+  // 1. Check Claude Code's native session status stamped in ~/.claude/sessions/<pid>.json
+  if (sessionMeta && sessionMeta.status === 'busy') {
+    const statusAgeMinutes = sessionMeta.statusUpdatedAt ? (now - sessionMeta.statusUpdatedAt) / 60000 : 0;
+    if (statusAgeMinutes <= 60) {
+      return 'ACTIVE';
+    }
+  }
+
   const ageMinutes = Math.max(0, Math.round((now - (messageTimeMs || 0)) / 60000));
-  if (ageMinutes > 10) return 'IDLE';
   if (!lastMeaningfulTurn) return 'IDLE';
 
   if (lastMeaningfulTurn.type === 'assistant') {
@@ -427,13 +434,13 @@ function computeBaselineAgentStatus(lastMeaningfulTurn, messageTimeMs, isProcess
     const hasText = typeof content === 'string' ? content.trim().length > 0 : (Array.isArray(content) && content.some(c => c.type === 'text' && c.text?.trim().length > 0));
 
     // If assistant returned no text and no tool use (e.g. intermediate thinking-only block) while process is alive:
-    if (!hasToolUse && !hasText && isProcessAlive && ageMinutes <= 3) {
+    if (!hasToolUse && !hasText && isProcessAlive && ageMinutes <= 5) {
       return 'ACTIVE';
     }
 
     if (stopReason === 'tool_use' || hasToolUse) {
       // If process is alive, agent is actively awaiting external tool execution, background task, or subagent:
-      if (isProcessAlive && ageMinutes <= 60) {
+      if (isProcessAlive && ageMinutes <= 120) {
         return 'ACTIVE';
       }
       return ageMinutes <= 5 ? 'ACTIVE' : 'IDLE';
@@ -449,10 +456,14 @@ function computeBaselineAgentStatus(lastMeaningfulTurn, messageTimeMs, isProcess
       return 'IDLE';
     }
 
-    return 'IDLE';
+    return ageMinutes <= 5 ? 'ACTIVE' : 'IDLE';
   }
 
   if (lastMeaningfulTurn.type === 'user') {
+    // If the last turn was a user prompt and process is alive, the agent is computing/tool-calling
+    if (isProcessAlive && ageMinutes <= 60) {
+      return 'ACTIVE';
+    }
     return ageMinutes <= 5 ? 'ACTIVE' : 'IDLE';
   }
 
@@ -478,8 +489,8 @@ function scanSubagentsForSession(projectFolder, sessionId, isProcessAlive, now =
       }
 
       const ageMinutes = Math.max(0, Math.round((now - st.mtimeMs) / 60000));
-      // Only inspect if modified recently (e.g. within last 30 minutes)
-      if (ageMinutes <= 30) {
+      // Inspect if modified recently (e.g. within last 60 minutes)
+      if (ageMinutes <= 60) {
         const subagentId = jf.replace(/^agent-/, '').replace(/\.jsonl$/, '');
         const metaPath = path.join(subagentsDir, `agent-${subagentId}.meta.json`);
         let meta = {};
@@ -489,15 +500,15 @@ function scanSubagentsForSession(projectFolder, sessionId, isProcessAlive, now =
 
         const { lastMeaningfulTurn } = readLastRawTurns(fullPath, 5, st);
         let subagentStatus = 'IDLE';
-        if (isProcessAlive && ageMinutes <= 15) {
+        if (ageMinutes <= 15) {
           if (lastMeaningfulTurn) {
             if (lastMeaningfulTurn.type === 'assistant') {
               const stopReason = lastMeaningfulTurn.message?.stop_reason;
-              if (stopReason === 'tool_use' || ageMinutes <= 2) {
+              if (stopReason === 'tool_use' || ageMinutes <= 3) {
                 subagentStatus = 'ACTIVE';
               }
             } else if (lastMeaningfulTurn.type === 'user') {
-              if (ageMinutes <= 5) subagentStatus = 'ACTIVE';
+              if (ageMinutes <= 10) subagentStatus = 'ACTIVE';
             }
           } else if (ageMinutes <= 3) {
             subagentStatus = 'ACTIVE';
@@ -523,10 +534,9 @@ function scanSubagentsForSession(projectFolder, sessionId, isProcessAlive, now =
 }
 
 function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, turns = []) {
-  if (!isProcessAlive) return [];
-
   const tasksDir = path.join(HOME, 'AppData', 'Local', 'Temp', 'claude', projectFolder, sessionId, 'tasks');
   const activeTasks = [];
+  const now = Date.now();
 
   const pendingTaskCandidates = new Map();
   const finishedTaskIds = new Set();
@@ -545,9 +555,9 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
     // Check for tool_use with run_in_background: true
     if (Array.isArray(content)) {
       for (const block of content) {
-        if (block.type === 'tool_use' && block.input?.run_in_background) {
-          const desc = block.input.description || block.name;
-          const cmd = block.input.command;
+        if (block.type === 'tool_use' && (block.input?.run_in_background || block.name === 'Bash')) {
+          const desc = block.input?.description || block.name;
+          const cmd = block.input?.command;
           if (i + 1 < turns.length) {
             const nextTurn = turns[i + 1];
             const nextContent = typeof nextTurn.message?.content === 'string' 
@@ -555,7 +565,7 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
               : JSON.stringify(nextTurn.message?.content || '');
             const idMatch = nextContent.match(/Command running in background with ID:\s*([a-zA-Z0-9_-]+)/);
             if (idMatch) {
-              const turnTimestamp = turn.timestamp ? new Date(turn.timestamp).getTime() : Date.now();
+              const turnTimestamp = turn.timestamp ? new Date(turn.timestamp).getTime() : now;
               pendingTaskCandidates.set(idMatch[1], {
                 taskId: idMatch[1],
                 description: desc,
@@ -570,7 +580,24 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
     }
   }
 
-  const now = Date.now();
+  // Also directly scan tasksDir for any background tasks on disk (including older turns or long-running tasks)
+  if (fs.existsSync(tasksDir)) {
+    try {
+      const outputFiles = fs.readdirSync(tasksDir).filter(f => f.endsWith('.output'));
+      for (const ofile of outputFiles) {
+        const taskId = ofile.replace(/\.output$/, '');
+        if (!pendingTaskCandidates.has(taskId) && !finishedTaskIds.has(taskId)) {
+          pendingTaskCandidates.set(taskId, {
+            taskId,
+            description: `Background Task (${taskId})`,
+            command: null,
+            turnIndex: -1,
+            turnTimestamp: now
+          });
+        }
+      }
+    } catch (e) {}
+  }
 
   for (const [taskId, info] of pendingTaskCandidates) {
     // 1. Authoritative check: transcript contains <task-notification> for this task
@@ -582,7 +609,7 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
 
     // 2. If file does not exist: allow a 45s grace period for newly launched tasks
     if (!fileExists) {
-      if (taskAgeMs < 45000) {
+      if (taskAgeMs < 45000 && isProcessAlive) {
         activeTasks.push({
           taskId,
           description: info.description,
@@ -604,6 +631,7 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
       const st = fs.statSync(outputFile);
       size = st.size;
       mtimeMs = st.mtimeMs;
+      const fileIdleMinutes = (now - mtimeMs) / 60000;
 
       // 4. Anchored trailing exit marker verification: Claude Code appends '\n\n[exited with code N]\n'
       if (st.size > 0) {
@@ -618,10 +646,8 @@ function detectActiveBackgroundTasks(projectFolder, sessionId, isProcessAlive, t
         }
       }
 
-      // 5. Orphan/Crash Guard: if the file hasn't been modified in > 45 minutes and no exit marker exists,
-      // the process died without cleanup (e.g. killed, rebooted, crash)
-      const fileIdleMinutes = (now - mtimeMs) / 60000;
-      if (!isExited && fileIdleMinutes > 45 && taskAgeMs > 45 * 60000) {
+      // 5. Idle Guard: if file hasn't been modified in > 60 minutes and process not active, treat as ended
+      if (!isExited && fileIdleMinutes > 60) {
         isExited = true;
       }
     } catch (err) {
@@ -758,10 +784,11 @@ function parseRateLimitNotice(text, now = new Date()) {
     /rate limit exceeded/i.test(text) ||
     /API usage capped/i.test(text) ||
     /(?:usage|session|rate) limit reached/i.test(text);
-  const hasTimeIndicator = /(?:resets?|try again|available again)\s+(?:at\s+|in\s+)?/i.test(text);
+  const hasTimeIndicator = /(?:resets?|try again|available again)\s+(?:at\s+|in\s+)/i.test(text) ||
+    /(?:resets?|try again|available again)\s+\d{1,2}(?::\d{2}|\s*(?:am|pm))/i.test(text);
 
   // If not an explicit limit statement and lacks any time indicator, ignore
-  if (!isExplicitLimitNotice && !isWeeklyLimit && !hasTimeIndicator && !/resets?\s+(?:at\s+)?\d+/i.test(text)) {
+  if (!isExplicitLimitNotice && !isWeeklyLimit && !hasTimeIndicator && !/resets?\s+at\s+\d+/i.test(text)) {
     return null;
   }
 
@@ -778,7 +805,14 @@ function parseRateLimitNotice(text, now = new Date()) {
     // 2. Check absolute time with specific weekday regex (prevents words like "in" from being treated as days)
     const timeMatch = text.match(/(?:resets?|try again|available again)\s+(?:at\s+)?(?:(Sun(?:day)?|Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:r(?:sday)?)?|Fri(?:day)?|Sat(?:urday)?)\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\)|\s+([A-Z]{2,5}))?/i);
     if (timeMatch) {
-      const [_, dayOfWeek, rawHours, rawMins, ampm, parenTz, suffixTz] = timeMatch;
+      const [fullMatch, dayOfWeek, rawHours, rawMins, ampm, parenTz, suffixTz] = timeMatch;
+
+      // Guard against false positives like "reset 2>&1" or shell commands:
+      // A valid time specification must include minutes (e.g. 5:00), am/pm (e.g. 5pm), timezone, day of week, or explicit "at <hour>"
+      if (!dayOfWeek && !rawMins && !ampm && !parenTz && !suffixTz && !/\b(?:at|resets\s+at)\s+\d+/i.test(fullMatch)) {
+        return null;
+      }
+
       let hours = parseInt(rawHours, 10);
       const mins = rawMins ? parseInt(rawMins, 10) : 0;
       const rawTz = parenTz || suffixTz || 'UTC';
@@ -967,7 +1001,24 @@ function scanAgents() {
             if (isSentinelPathOrFolder(meta.cwd, null)) {
               continue;
             }
-            activeSessionMeta.set(meta.sessionId, meta);
+            const existing = activeSessionMeta.get(meta.sessionId);
+            if (!existing) {
+              activeSessionMeta.set(meta.sessionId, meta);
+            } else {
+              const isMetaAlive = meta.pid ? isPidAlive(meta.pid) : false;
+              const isExistingAlive = existing.pid ? isPidAlive(existing.pid) : false;
+              if (isMetaAlive && !isExistingAlive) {
+                activeSessionMeta.set(meta.sessionId, meta);
+              } else if (!isMetaAlive && isExistingAlive) {
+                // keep existing
+              } else {
+                const metaTime = Math.max(meta.updatedAt || 0, meta.startedAt || 0);
+                const existingTime = Math.max(existing.updatedAt || 0, existing.startedAt || 0);
+                if (metaTime > existingTime) {
+                  activeSessionMeta.set(meta.sessionId, meta);
+                }
+              }
+            }
           }
         } catch (e) {}
       }
@@ -1036,7 +1087,7 @@ function scanAgents() {
         continue;
       }
       const isEnabled = !(config.disabledSessionIds || []).includes(s.sessionId);
-      const baselineStatus = computeBaselineAgentStatus(s.lastMeaningfulTurn, s.messageTimeMs, isProcessAlive, now);
+      const baselineStatus = computeBaselineAgentStatus(s.lastMeaningfulTurn, s.messageTimeMs, isProcessAlive, now, meta);
 
       let agent = state.agents.get(s.sessionId);
       if (!agent) {
@@ -1138,8 +1189,16 @@ function scanAgents() {
         for (let i = s.turns.length - 1; i >= Math.max(0, s.turns.length - 5); i--) {
           const t = s.turns[i];
           const turnTime = t.timestamp ? new Date(t.timestamp).getTime() : (agent.messageTimeMs || now);
-          const textCandidate = t.message?.content ? (typeof t.message.content === 'string' ? t.message.content : JSON.stringify(t.message.content)) : '';
-          if (/ran out of context|continued from a previous conversation/i.test(textCandidate)) {
+          let textCandidate = '';
+          if (typeof t.message?.content === 'string') {
+            textCandidate = t.message.content;
+          } else if (Array.isArray(t.message?.content)) {
+            textCandidate = t.message.content
+              .filter(b => b.type === 'text' && typeof b.text === 'string')
+              .map(b => b.text)
+              .join('\n');
+          }
+          if (!textCandidate || /ran out of context|continued from a previous conversation/i.test(textCandidate)) {
             continue;
           }
           const l = parseRateLimitNotice(textCandidate, new Date(turnTime));
@@ -1157,6 +1216,14 @@ function scanAgents() {
           resetAtIso: new Date(turnTime + 3600000).toISOString(),
           timeUntilMinutes: 60
         };
+      }
+
+      // If Cognitive Supervisor evaluated this turn as NOT limited, respect LLM judgment over fallback heuristics
+      if (detectedLimit && agent.llmEvaluation && !agent.llmEvaluation.isLimited) {
+        const evalTime = new Date(agent.llmEvaluation.evaluatedAt).getTime();
+        if (latestAssistantTimestamp <= evalTime + 2000) {
+          detectedLimit = null;
+        }
       }
 
       if (detectedLimit) {
@@ -1229,7 +1296,7 @@ function scanAgents() {
         const activeTasks = detectActiveBackgroundTasks(s.projectFolder, s.sessionId, isProcessAlive, s.turns);
         agent.activeTasks = activeTasks;
 
-        const hasActiveWork = (activeSubagents && activeSubagents.length > 0) || (activeTasks && activeTasks.length > 0);
+        const hasActiveWork = (activeSubagents && activeSubagents.length > 0) || (activeTasks && activeTasks.length > 0) || (meta.status === 'busy' && isProcessAlive);
 
         if (agent.llmEvaluation && !agent.needsEvaluation) {
           const evalAgeMs = agent.llmEvaluation.evaluatedAt ? (now - new Date(agent.llmEvaluation.evaluatedAt).getTime()) : 0;
@@ -1269,7 +1336,17 @@ function scanAgents() {
       }
 
       agent.activitySignature = `${agent.fileSize}_${agent.messageTimeMs}_${agent.isProcessAlive}_${agent.status}`;
-      agent.needsEvaluation = (agent.lastEvaluatedSignature !== agent.activitySignature);
+      if (agent.lastEvaluatedSignature === undefined) {
+        const hasActiveWork = (agent.activeSubagents && agent.activeSubagents.length > 0) || (agent.activeTasks && agent.activeTasks.length > 0);
+        if (!agent.isProcessAlive && agent.status === 'IDLE' && agent.ageMinutes > 15 && !hasActiveWork) {
+          agent.lastEvaluatedSignature = agent.activitySignature;
+          agent.needsEvaluation = false;
+        } else {
+          agent.needsEvaluation = true;
+        }
+      } else {
+        agent.needsEvaluation = (agent.lastEvaluatedSignature !== agent.activitySignature);
+      }
     }
 
     state.stats.totalScanned = state.agents.size;
@@ -1279,13 +1356,21 @@ function scanAgents() {
 
     // Check for Hibernate on All Agents Completed
     if (config.hibernateOnAllCompleted) {
-      if (!state.hibernateOnAllCompletedArmed && (activeCount > 0 || limitedCount > 0)) {
-        state.hibernateOnAllCompletedArmed = true;
-        addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: Watchdog armed (monitoring ${activeCount} active, ${limitedCount} limited agent(s))`);
-        broadcastSSE('hibernation_status', {
-          pending: false,
-          armed: true
-        });
+      // STRICT IDLE ARMING GUARD:
+      // The watchdog must ONLY be armed if at least one agent is actively in-flight (ACTIVE or LIMITED).
+      // If all agents are already idle/completed when the option is enabled, DO NOT arm and DO NOT hibernate!
+      const hasInFlightWork = (activeCount > 0 || limitedCount > 0);
+
+      if (!state.hibernateOnAllCompletedArmed) {
+        if (hasInFlightWork) {
+          state.hibernateOnAllCompletedArmed = true;
+          const msg = `💤 Hibernate on Completion: Watchdog armed (monitoring ${activeCount} active, ${limitedCount} limited agent(s))`;
+          addEvent('INFO', null, 'SYSTEM', msg);
+          broadcastSSE('hibernation_status', {
+            pending: false,
+            armed: true
+          });
+        }
       }
 
       if (state.hibernateOnAllCompletedArmed) {
@@ -1553,14 +1638,6 @@ function getSanitizedStatus() {
 
   agentList.sort((a, b) => (b.messageTimeMs || 0) - (a.messageTimeMs || 0));
 
-  if (state.hibernation.pending && state.hibernation.targetTimestamp && Date.now() >= state.hibernation.targetTimestamp) {
-    state.hibernation.pending = false;
-    state.hibernation.triggerType = null;
-    state.hibernation.reason = null;
-    state.hibernation.targetTimestamp = null;
-    state.hibernation.timer = null;
-  }
-
   return {
     systemTime: new Date().toISOString(),
     serverStartedAt: state.startedAt,
@@ -1711,11 +1788,16 @@ const server = http.createServer((req, res) => {
                   a.enabled && (a.status === 'ACTIVE' || a.status === 'LIMITED' || a.status === 'RESUMING' || a.status === 'VERIFYING' || a.status === 'AUTO_FIXING' || a.status === 'AUTO_IMPROVING')
                 ).length;
 
-                state.hibernateOnAllCompletedArmed = true;
                 if (currentInFlightCount > 0) {
+                  state.hibernateOnAllCompletedArmed = true;
                   addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: ARMED (monitoring ${currentInFlightCount} in-flight agent${currentInFlightCount > 1 ? 's' : ''})`);
                 } else {
-                  addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: ARMED (watching for in-flight tasks)`);
+                  // STRICT IDLE ARMING GUARD:
+                  // Do not arm completion countdown if all agents are currently idle!
+                  // Stand by and wait for active tasks to begin before arming.
+                  state.hibernateOnAllCompletedArmed = false;
+                  state.allAgentsCompletedSince = null;
+                  addEvent('INFO', null, 'SYSTEM', `💤 Hibernate on Completion: STANDBY (all agents are currently idle; watchdog will arm when active work begins)`);
                 }
               } else {
                 state.hibernateOnAllCompletedArmed = false;
@@ -2129,6 +2211,8 @@ module.exports = {
   pruneEventsFile,
   loadPersistedResumes,
   savePersistedResumes,
+  computeBaselineAgentStatus,
+  detectActiveBackgroundTasks,
   startServer
 };
 

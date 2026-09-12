@@ -1,9 +1,9 @@
 {
   "globalPaused": false,
   "lookbackHours": 24,
-  "recheckIntervalSeconds": 120,
-  "hibernateOnWeeklyLimit": true,
-  "hibernateOnAllCompleted": true,
+  "recheckIntervalSeconds": 240,
+  "hibernateOnWeeklyLimit": false,
+  "hibernateOnAllCompleted": false,
   "autoResumeEnabled": true,
   "defaultAutoContinue": true,
   "defaultAutoFix": false,
