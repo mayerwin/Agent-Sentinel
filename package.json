@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "stop": "node -e \"fetch('http://localhost:3456/api/shutdown', {method:'POST'}).then(r => r.json()).then(d => console.log(d.message || 'Server stopped.')).catch(() => console.log('Server is not running.'))\"",
+    "build:tray": "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe /target:winexe /optimize+ /out:AgentSentinel.exe /r:System.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll tools\\AgentSentinelTray.cs",
     "supervise": "node tools/supervise-cli.js",
     "test": "node test/test_suite.js"
   },

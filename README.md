@@ -86,14 +86,13 @@ Configure behavior globally in Settings or override per agent:
 
 ### Method B: Native System Tray App (Zero Terminal Flash / Silent Mode)
 Run Agent Sentinel as a lightweight Windows System Tray application:
-- **`AgentSentinel.exe`** or **`Launch.bat`** *(Recommended)*: Starts Sentinel completely hidden with zero console window flash. Runs quietly in your Windows notification area (System Tray) with a glowing Sentinel badge:
+- **`AgentSentinel.exe`** *(Recommended)*: Double-click to start Sentinel completely hidden in the background with zero console window flash. Runs quietly in your Windows notification area (System Tray) with a glowing emerald Sentinel badge:
   - **Left-Click / Double-Click**: Opens the dashboard at **[http://localhost:3456](http://localhost:3456)** in your default browser.
   - **Right-Click Context Menu**:
-    - **Open Dashboard**
-    - **Scan Workspaces** (instantly rescans all agent workspaces)
-    - **Exit Agent Sentinel** (gracefully stops the server and cleans up the tray icon)
-  - **Single Instance Protection**: Re-launching simply focuses/opens the browser dashboard without duplicate processes.
-- **`Stop.bat`**: 1-click script to gracefully stop the background server and tray application.
+    - **Open Dashboard**: Quick access to the web dashboard.
+    - **Scan Workspaces**: Instantly rescans all agent workspaces.
+    - **Exit Agent Sentinel**: Gracefully stops the server and cleans up the tray icon.
+  - **Single Instance Protection**: Re-launching simply focuses/opens the browser dashboard without duplicate processes or extra icons.
 
 ---
 
@@ -101,6 +100,10 @@ Run Agent Sentinel as a lightweight Windows System Tray application:
 1. Open terminal in the directory:
    ```bash
    npm start
+   ```
+   To stop the server from the terminal:
+   ```bash
+   npm stop
    ```
 2. Open your browser to **[http://localhost:3456](http://localhost:3456)** (or **[http://localhost:3456/?demo=true](http://localhost:3456/?demo=true)** for sanitized demo mode).
 
