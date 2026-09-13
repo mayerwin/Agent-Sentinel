@@ -84,11 +84,16 @@ Configure behavior globally in Settings or override per agent:
 
 ---
 
-### Method B: 1-Click Desktop Shortcut (Zero Terminal / Silent Mode)
-Double-click either launcher in the root folder:
-- **`Launch.vbs`** *(Recommended)*: Starts the server completely hidden in the background (0% console window flash) and automatically opens **[http://localhost:3456](http://localhost:3456)** in your default browser.
-- **`Launch.bat`**: Batch launcher alternative.
-- **`Stop.bat`**: 1-click script to gracefully stop the background daemon.
+### Method B: Native System Tray App (Zero Terminal Flash / Silent Mode)
+Run Agent Sentinel as a lightweight Windows System Tray application:
+- **`AgentSentinel.exe`** or **`Launch.bat`** *(Recommended)*: Starts Sentinel completely hidden with zero console window flash. Runs quietly in your Windows notification area (System Tray) with a glowing Sentinel badge:
+  - **Left-Click / Double-Click**: Opens the dashboard at **[http://localhost:3456](http://localhost:3456)** in your default browser.
+  - **Right-Click Context Menu**:
+    - **Open Dashboard**
+    - **Scan Workspaces** (instantly rescans all agent workspaces)
+    - **Exit Agent Sentinel** (gracefully stops the server and cleans up the tray icon)
+  - **Single Instance Protection**: Re-launching simply focuses/opens the browser dashboard without duplicate processes.
+- **`Stop.bat`**: 1-click script to gracefully stop the background server and tray application.
 
 ---
 
